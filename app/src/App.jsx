@@ -4194,7 +4194,7 @@ export default function SocialBladeLive() {
     return tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, target)));
   }, []);
 
-  const [pos, setPos] = useState(() => _ss.pos != null ? _ss.pos : initNowPos);
+  const [pos, setPos] = useState(() => _ss.pos != null ? _ss.pos : tsToPos(Date.UTC(2018, 9, 18, 4, 0)));
   const [menuOpen, setMenuOpen] = useState(() => _ss.menuOpen != null ? _ss.menuOpen : true);
   const [barHidden, setBarHidden] = useState(() => _ss.barHidden ?? false);
   // SocialBlade "realistic bounds": snap the 1hr-growth / 1hr-gap / 1day-gap chart
@@ -6506,20 +6506,28 @@ export default function SocialBladeLive() {
               <select value={speedMode} onChange={e=>{dispatch({type:"SET_MODE",mode:e.target.value});e.target.blur();}} style={{ background:"#0e1018", color:"#aaa", border:"1px solid #1e1e1e", borderRadius:4, padding:"2px 4px", fontSize:11, fontFamily:"inherit", cursor:"pointer", outline:"none" }}>
                 {ALL_MODES.map(m=><option key={m.key} value={m.key}>{m.label}</option>)}
               </select>
-              {isRTMode && <div style={{display:"flex",alignItems:"center",gap:2}} title="RT update interval">
-                <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:34,accentColor:"#4a6080",cursor:"pointer"}}/>
-                <span style={{fontSize:9,color:"#888",minWidth:12}}>{rtInterval}s</span>
+              {isRTMode && <div style={{display:"flex",flexDirection:"column",gap:1}}>
+                <span style={{fontSize:9,color:"#666",letterSpacing:"0.03em"}}>Counter Update Interval</span>
+                <div style={{display:"flex",alignItems:"center",gap:2}}>
+                  <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:34,accentColor:"#4a6080",cursor:"pointer"}}/>
+                  <span style={{fontSize:9,color:"#888",minWidth:12}}>{rtInterval}s</span>
+                </div>
               </div>}
               {/* Mult slider in log10-space: -1..2 = 0.1x..100x; 0 = 1x centered */}
-              <input type="range" min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()} style={{width:68,accentColor:"#4a6080",cursor:"pointer"}}/>
-              <input ref={multInputRef} type="text" inputMode="decimal" value={multText}
-                onChange={e=>{ const s=e.target.value; setMultText(s); const v=parseFloat(s); if(!isNaN(v)&&v>=MULT_MIN&&v<=MULT_MAX)dispatch({type:"SET_MULT",mult:v}); }}
-                onBlur={()=>setMultText(String(parseFloat(mult.toFixed(2))))}
-                onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
-                style={{width:36,background:"#0e1018",color:mult!==1?"#bbb":"#888",border:"1px solid #1e1e1e",borderRadius:4,padding:"2px 4px",fontSize:11,fontFamily:"inherit",textAlign:"right",outline:"none",fontVariantNumeric:"tabular-nums"}}/>
-              <span style={{fontSize:10,color:mult!==1?"#888":"#777"}}>x</span>
+              <div style={{display:"flex",flexDirection:"column",gap:1}}>
+                <span style={{fontSize:9,color:"#666",letterSpacing:"0.03em"}}>Playback Speed</span>
+                <div style={{display:"flex",alignItems:"center",gap:5}}>
+                  <input type="range" min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()} style={{width:68,accentColor:"#4a6080",cursor:"pointer"}}/>
+                  <input ref={multInputRef} type="text" inputMode="decimal" value={multText}
+                    onChange={e=>{ const s=e.target.value; setMultText(s); const v=parseFloat(s); if(!isNaN(v)&&v>=MULT_MIN&&v<=MULT_MAX)dispatch({type:"SET_MULT",mult:v}); }}
+                    onBlur={()=>setMultText(String(parseFloat(mult.toFixed(2))))}
+                    onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
+                    style={{width:36,background:"#0e1018",color:mult!==1?"#bbb":"#888",border:"1px solid #1e1e1e",borderRadius:4,padding:"2px 4px",fontSize:11,fontFamily:"inherit",textAlign:"right",outline:"none",fontVariantNumeric:"tabular-nums"}}/>
+                  <span style={{fontSize:10,color:mult!==1?"#888":"#777"}}>x</span>
+                </div>
+              </div>
               {/* Dynamic: getDynSpeed drives rAF-paced playhead at gap-dependent rate */}
-              <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 6px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Dyn<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>
+              <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 6px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Dynamic<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>
             </div>
           </div>
 
@@ -6527,7 +6535,7 @@ export default function SocialBladeLive() {
           {isRTSpeedMode(speedMode) && <>
             <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
             <div style={{display:"flex",flexDirection:"column",gap:3,paddingRight:10}} title="Phase-shift PT/TT counter updates; SB lands at midpoint">
-              <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>PHASE</span>
+              <span style={{fontSize:10,color:"#888",letterSpacing:"0.04em"}}>Counters Desync Shift</span>
               <div style={{display:"flex",alignItems:"center",gap:4}}>
                 <input type="range" min={0} max={1} step={0.01} value={desync} onChange={e=>dispatch({type:"SET_DESYNC",value:parseFloat(e.target.value)})} onMouseUp={e=>e.target.blur()} style={{width:60,accentColor:"#4a6080",cursor:"pointer"}}/>
                 <span style={{fontSize:10,color:"#888",fontVariantNumeric:"tabular-nums",minWidth:24,textAlign:"right"}}>{desync.toFixed(2)}</span>
@@ -6600,16 +6608,17 @@ export default function SocialBladeLive() {
             </div>
           </div>}
 
-          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-
-          {/* WINDOW */}
-          <div style={{display:"flex",flexDirection:"column",gap:3}}>
-            <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>WINDOW</span>
-            <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
-              <button onClick={()=>{ setScale(1); window.resizeTo(1280,720+(window.outerHeight-window.innerHeight)); }} title="Resize to 1280x720 viewport" style={{ background:scale===1?"#1e2535":"transparent", color:scale===1?"#aaa":"#777", border:"none", borderRight:"1px solid #1e1e1e", padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>720p</button>
-              <button onClick={()=>{ setScale(1.5); window.resizeTo(1920,1080+(window.outerHeight-window.innerHeight)); }} title="Render Flare at 1920x1080" style={{ background:scale===1.5?"#1e2535":"transparent", color:scale===1.5?"#aaa":"#777", border:"none", padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>1080p</button>
+          {devMode && <>
+            <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
+            {/* WINDOW */}
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>WINDOW</span>
+              <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
+                <button onClick={()=>{ setScale(1); window.resizeTo(1280,720+(window.outerHeight-window.innerHeight)); }} title="Resize to 1280x720 viewport" style={{ background:scale===1?"#1e2535":"transparent", color:scale===1?"#aaa":"#777", border:"none", borderRight:"1px solid #1e1e1e", padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>720p</button>
+                <button onClick={()=>{ setScale(1.5); window.resizeTo(1920,1080+(window.outerHeight-window.innerHeight)); }} title="Render Flare at 1920x1080" style={{ background:scale===1.5?"#1e2535":"transparent", color:scale===1.5?"#aaa":"#777", border:"none", padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>1080p</button>
+              </div>
             </div>
-          </div>
+          </>}
 
         </div>}
         {false && <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",borderTop:"1px solid #1a1d28",flexWrap:"nowrap",overflow:"hidden"}}>
