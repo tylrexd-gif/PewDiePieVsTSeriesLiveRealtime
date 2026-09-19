@@ -6527,7 +6527,7 @@ export default function SocialBladeLive() {
                 </div>
               </div>
               {/* Dynamic: getDynSpeed drives rAF-paced playhead at gap-dependent rate */}
-              <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 6px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Dynamic<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>
+              {speedMode==="1m" && <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 6px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Dynamic<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>}
             </div>
           </div>
 
