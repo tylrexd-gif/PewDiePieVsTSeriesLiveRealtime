@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PVT Realtime</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Montserrat:ital,wght@0,900;1,900&family=Roboto:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+      @font-face {
+        font-family: 'Twemoji Country Flags';
+        unicode-range: U+1F1E0-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+        src: url('/data/TwemojiCountryFlags.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'Compose Black Obl';
+        font-style: oblique;
+        font-weight: 900;
+        src: url('/data/Compose-BlackObl.ttf') format('truetype'),
+             url('/data/Compose Black Obl.ttf') format('truetype'),
+             url('/data/ComposeBlackObl.ttf') format('truetype');
+      }
+      @font-face {
+        font-family: 'Compose Black Oblique';
+        font-style: oblique;
+        font-weight: 900;
+        src: url('/data/Compose-BlackObl.ttf') format('truetype'),
+             url('/data/Compose Black Obl.ttf') format('truetype'),
+             url('/data/ComposeBlackObl.ttf') format('truetype');
+      }
+      @font-face {
+        font-family: 'Compose Black';
+        font-style: normal;
+        font-weight: 900;
+        src: url('/data/Compose-Black.ttf') format('truetype'),
+             url('/data/Compose Black.ttf') format('truetype'),
+             url('/data/ComposeBlack.ttf') format('truetype');
+      }
+      body { margin: 0; background: #0a0a0a; font-family: 'Twemoji Country Flags', sans-serif; }
+      #loading {
+        position: fixed; inset: 0; z-index: 99999; background: #0a0a0a;
+        font-family: monospace; font-size: 15px; color: #888;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+      }
+      #loading-stage { color: #bbb; font-size: 13px; max-width: 90vw; text-align: center; line-height: 1.4; }
+      #loading-bar-wrap { width: 280px; height: 4px; background: #222; border-radius: 2px; overflow: hidden; }
+      #loading-bar { height: 100%; width: 0%; background: #6b8cce; transition: width 0.15s linear; }
+      #loading-bar.indeterminate { width: 35%; animation: loading-slide 1.1s ease-in-out infinite; }
+      @keyframes loading-slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+      #loading-time { color: #555; font-size: 11px; }
+    </style>
+    <script>
+      var _t0 = Date.now();
+      var _timer = setInterval(function() {
+        var el = document.getElementById('loading-time');
+        if (el) el.textContent = ((Date.now() - _t0) / 1000).toFixed(1) + 's elapsed';
+      }, 100);
+      window._setLoadingBar = function(pct) {
+        var bar = document.getElementById('loading-bar');
+        if (!bar) return;
+        if (pct == null) {
+          bar.classList.add('indeterminate');
+          bar.style.width = '';
+          return;
+        }
+        bar.classList.remove('indeterminate');
+        bar.style.marginLeft = '';
+        bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+      };
+      window._setStage = function(msg) {
+        var el = document.getElementById('loading-stage');
+        if (el) el.textContent = msg;
+      };
+      window._dismissLoading = function() {
+        clearInterval(_timer);
+        var el = document.getElementById('loading');
+        if (el) el.style.display = 'none';
+      };
+      setInterval(function() { fetch('/ping').catch(function(){}); }, 5000);
+      window.addEventListener('unload', function() { navigator.sendBeacon('/ping'); });
+      window.onerror = function(msg, src, line, col, err) {
+        clearInterval(_timer);
+        document.body.innerHTML = '<pre style="color:red;padding:20px;white-space:pre-wrap">' + msg + '\n\n' + (err && err.stack || '') + '</pre>';
+      };
+    </script>
+    <script>
+      (function() {
+        function mb(n) {
+          if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+          return (n / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+        window.__NOISE_BIN_PROMISE = new Promise(function(resolve) {
+          window._setStage('Loading noise cache (0%)…');
+          window._setLoadingBar(0);
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', '/data/noise_cache.bin');
+          xhr.responseType = 'arraybuffer';
+          xhr.onprogress = function(e) {
+            if (e.lengthComputable && e.total > 0) {
+              var pct = Math.round((100 * e.loaded) / e.total);
+              window._setLoadingBar(pct);
+              window._setStage('Loading noise cache ' + pct + '% (' + mb(e.loaded) + ' / ' + mb(e.total) + ')');
+            } else if (e.loaded > 0) {
+              window._setStage('Loading noise cache… ' + mb(e.loaded));
+            }
+          };
+          xhr.onload = function() {
+            if (xhr.status === 200 && xhr.response) {
+              window.__NOISE_BIN = xhr.response;
+              window._setLoadingBar(100);
+              window._setStage('Noise cache downloaded (' + mb(xhr.response.byteLength) + ') — parsing…');
+              resolve(xhr.response);
+            } else {
+              window._setStage('Noise cache unavailable — using generated noise');
+              resolve(null);
+            }
+          };
+          xhr.onerror = function() {
+            window._setStage('Noise cache unavailable — using generated noise');
+            resolve(null);
+          };
+          xhr.send();
+        });
+      })();
+    </script>
+    <script>
+      window._setStage('Loading data sheets…');
+      window._setLoadingBar(null);
+    </script>
+    <script src="/data/bundle.js" onload="window._setStage('Data sheets ready: ' + ((window.__DATA||{}).H||[]).length + ' hours, ' + ((window.__DATA||{}).inflections||[]).length + ' events, ' + ((window.__DATA||{}).audits||[]).length + ' audits')"></script>
+    <script type="module" src="/src/main.jsx"></script>
+  </head>
+  <body>
+    <div id="loading">
+      <div id="loading-stage">Starting…</div>
+      <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+      <div id="loading-time">0.0s elapsed</div>
+    </div>
+    <div id="root"></div>
+  </body>
+</html>

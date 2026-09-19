@@ -1,0 +1,23 @@
+# dev artifacts
+.logs/
+ts_banners/
+DEV/
+RUNBOOKS/
+SCRIPTS/
+CLAUDE.md
+.claude/
+helper/
+
+# data dev files
+app/dist/data/*.bak
+app/dist/data/*-bak
+app/dist/data/smooth_report.json
+app/dist/data/manual_patches.json
+app/dist/data/backup_data/
+
+# node
+app/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

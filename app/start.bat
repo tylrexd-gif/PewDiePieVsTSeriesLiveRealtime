@@ -1,0 +1,3 @@
+@echo off
+echo Starting PVT Live...
+node server.js

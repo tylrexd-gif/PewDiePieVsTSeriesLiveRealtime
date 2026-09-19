@@ -1,0 +1,12 @@
+{
+  "buildCommand": "cd app && npm install && npm run build",
+  "outputDirectory": "app/dist",
+  "rewrites": [
+    { "source": "/data/bundle.js", "destination": "/api/bundle" }
+  ],
+  "functions": {
+    "api/bundle.js": {
+      "includeFiles": "app/dist/data/*.{tsv,csv,json}"
+    }
+  }
+}
