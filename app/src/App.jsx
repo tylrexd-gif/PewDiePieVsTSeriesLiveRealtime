@@ -6558,6 +6558,10 @@ export default function SocialBladeLive() {
                 : <span onClick={()=>setClockEditing(true)} title="Click to jump to date/time" style={{fontSize:11,color:"#999",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",cursor:"pointer",padding:"1px 5px",background:"#0e1018",borderRadius:3,border:"1px solid #1a1d28",width:132,display:"inline-block",textAlign:"center"}}>{fmtDateTime(curTime)}</span>}
               <span ref={fpsDisplayRef} style={{fontSize:9,color:"#666",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",width:40,textAlign:"right",display:"inline-block"}}>-- fps</span>
             </div>
+            <div style={{display:"flex",gap:16}}>
+              <span style={{fontSize:10,color:"#aaa"}}>H — hide/show bar</span>
+              <span style={{fontSize:10,color:"#aaa"}}>Space — play/pause</span>
+            </div>
           </div>
 
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
@@ -6607,11 +6611,6 @@ export default function SocialBladeLive() {
               {view==="dashboard" && <button onClick={()=>setDashRawDelta(v=>!v)} title="Replace last chart slot with Raw-minus-Smooth delta for both channels (last 1h)" style={{ background:dashRawDelta?"#1e1535":"transparent", color:dashRawDelta?"#b88cf7":"#777", border:"1px solid "+(dashRawDelta?"#4d2d9a":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Delta</button>}
             </div>
           </div>}
-
-          <div style={{marginLeft:"auto",display:"flex",flexDirection:"column",justifyContent:"center",gap:3,paddingLeft:14,opacity:0.45}}>
-            <span style={{fontSize:9,color:"#888",whiteSpace:"nowrap"}}>H — hide/show bar</span>
-            <span style={{fontSize:9,color:"#888",whiteSpace:"nowrap"}}>Space — play/pause</span>
-          </div>
 
           {devMode && <>
             <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
