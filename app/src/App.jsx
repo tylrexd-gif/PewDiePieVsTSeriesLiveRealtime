@@ -6557,31 +6557,32 @@ export default function SocialBladeLive() {
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
           {/* SPEED */}
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
+          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:3,paddingRight:14}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SPEED</span>
-            <div style={{display:"flex",alignItems:"center",gap:6}}>
-              <select value={speedMode} onChange={e=>{dispatch({type:"SET_MODE",mode:e.target.value});e.target.blur();}} style={{ background:"#0e1018", color:"#aaa", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 6px", fontSize:12, fontFamily:"inherit", cursor:"pointer", outline:"none" }}>
+            {/* Labels row — same gap/widths as controls row below */}
+            <div style={{display:"flex",alignItems:"flex-end",gap:16}}>
+              <div style={{minWidth:76}} />{/* spacer matching select width */}
+              {isRTMode && <span style={{fontSize:11,color:"#b85050",letterSpacing:"0.03em",width:148}}>Counter Update Interval</span>}
+              <span style={{fontSize:11,color:"#4e9e4e",letterSpacing:"0.03em"}}>Playback Speed</span>
+            </div>
+            {/* Controls row */}
+            <div style={{display:"flex",alignItems:"center",gap:16}}>
+              <select value={speedMode} onChange={e=>{dispatch({type:"SET_MODE",mode:e.target.value});e.target.blur();}} style={{ background:"#0e1018", color:"#aaa", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 6px", fontSize:12, fontFamily:"inherit", cursor:"pointer", outline:"none", minWidth:76 }}>
                 {ALL_MODES.map(m=><option key={m.key} value={m.key}>{m.label}</option>)}
               </select>
-              {isRTMode && <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                <span style={{fontSize:11,color:"#777",letterSpacing:"0.03em"}}>Counter Update Interval</span>
-                <div style={{display:"flex",alignItems:"center",gap:3}}>
-                  <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:100,accentColor:"#4a6080",cursor:"pointer"}}/>
-                  <span style={{fontSize:11,color:"#999",minWidth:16}}>{rtInterval}s</span>
-                </div>
+              {isRTMode && <div style={{display:"flex",alignItems:"center",gap:4,width:148}}>
+                <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:116,accentColor:"#c05050",cursor:"pointer"}}/>
+                <span style={{fontSize:11,color:"#b07070",minWidth:20}}>{rtInterval}s</span>
               </div>}
               {/* Mult slider in log10-space: -1..2 = 0.1x..100x; 0 = 1x centered */}
-              <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                <span style={{fontSize:11,color:"#777",letterSpacing:"0.03em"}}>Playback Speed</span>
-                <div style={{display:"flex",alignItems:"center",gap:5}}>
-                  <input type="range" min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()} style={{width:80,accentColor:"#4a6080",cursor:"pointer"}}/>
-                  <input ref={multInputRef} type="text" inputMode="decimal" value={multText}
-                    onChange={e=>{ const s=e.target.value; setMultText(s); const v=parseFloat(s); if(!isNaN(v)&&v>=MULT_MIN&&v<=MULT_MAX)dispatch({type:"SET_MULT",mult:v}); }}
-                    onBlur={()=>setMultText(String(parseFloat(mult.toFixed(2))))}
-                    onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
-                    style={{width:40,background:"#0e1018",color:mult!==1?"#bbb":"#888",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 5px",fontSize:12,fontFamily:"inherit",textAlign:"right",outline:"none",fontVariantNumeric:"tabular-nums"}}/>
-                  <span style={{fontSize:12,color:mult!==1?"#888":"#777"}}>x</span>
-                </div>
+              <div style={{display:"flex",alignItems:"center",gap:5}}>
+                <input type="range" min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()} style={{width:84,accentColor:"#3a9e3a",cursor:"pointer"}}/>
+                <input ref={multInputRef} type="text" inputMode="decimal" value={multText}
+                  onChange={e=>{ const s=e.target.value; setMultText(s); const v=parseFloat(s); if(!isNaN(v)&&v>=MULT_MIN&&v<=MULT_MAX)dispatch({type:"SET_MULT",mult:v}); }}
+                  onBlur={()=>setMultText(String(parseFloat(mult.toFixed(2))))}
+                  onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
+                  style={{width:40,background:"#0e1018",color:mult!==1?"#bbb":"#888",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 5px",fontSize:12,fontFamily:"inherit",textAlign:"right",outline:"none",fontVariantNumeric:"tabular-nums"}}/>
+                <span style={{fontSize:12,color:mult!==1?"#888":"#777"}}>x</span>
               </div>
               {/* Dynamic: getDynSpeed drives rAF-paced playhead at gap-dependent rate */}
               {speedMode==="1m" && <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Dynamic<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>}
