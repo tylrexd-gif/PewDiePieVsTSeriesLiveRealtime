@@ -1,4 +1,6 @@
 ﻿import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer, useLayoutEffect } from "react";
+import { FLARE_NEWS_ENTRIES, FLARE_PROMOTIONS, PROMO_DISPLAY_START_MS } from './flareNewsData.js';
+import { VOTE_LOG } from './flareVoteData.js';
 import ReactDOM from 'react-dom/client';
 
 /*
@@ -1457,7 +1459,7 @@ function playbackReducer(state, action) {
     case "PLAY": return { ...state, playing: true };
     case "STOP": return { ...state, playing: false };
     case "TOGGLE_REVERSE": return { ...state, reverse: !state.reverse };
-    case "SET_MODE": return { ...state, speedMode: action.mode };
+    case "SET_MODE": return { ...state, speedMode: action.mode, dyn: action.mode === "1m" ? state.dyn : false };
     case "SET_DESYNC": return { ...state, desync: Math.max(0, Math.min(1, action.value)) };
     case "TOGGLE_MINUTE_SNAP": return { ...state, minuteSnap: !state.minuteSnap };
     case "BUMP_SEEK": return { ...state, seekToken: state.seekToken + 1 };
@@ -1583,12 +1585,24 @@ const computeDailyVoteIncrement = (dayStartMs, ftvDailyGain, pdpGrowth, tsGrowth
 
 const VOTE_SCHEDULE = [];
 
-// Resolve the vote counts active at `clockTime`. Binary-searches
-// VOTE_SCHEDULE for the latest day boundary at or before t. Returns
-// the cumulative counts plus whole-percent splits. Before Apr 1 the
-// anchor values are returned unchanged (pre-poll-launch fallback).
+// Resolve the vote counts active at `clockTime`.
+// Prefers VOTE_LOG (src/flareVoteData.js) — returns the last logged entry
+// at or before t. Falls back to the algorithmic VOTE_SCHEDULE/anchor for
+// times before the first log entry or when the log is empty.
 const resolveVoteCounts = (clockTime) => {
   const t = clockTime || 0;
+  if (VOTE_LOG.length > 0 && t >= VOTE_LOG[0].ms) {
+    let lo = 0, hi = VOTE_LOG.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (VOTE_LOG[mid].ms <= t) lo = mid;
+      else hi = mid - 1;
+    }
+    const e = VOTE_LOG[lo];
+    const total = e.pdp + e.ts;
+    const pdpPct = total > 0 ? Math.round((e.pdp / total) * 100) : 50;
+    return { pdp: e.pdp, ts: e.ts, pdpPct, tsPct: 100 - pdpPct };
+  }
   if (!VOTE_SCHEDULE.length || t < VOTE_SCHEDULE[0].t) {
     const total = VOTE_ANCHOR_PDP + VOTE_ANCHOR_TS;
     const pdpPct = Math.round((VOTE_ANCHOR_PDP / total) * 100);
@@ -2505,14 +2519,54 @@ const getFlareTickerMessage = () =>
   ' - Like other streams, rules do exist here. Send !rules in chat to read them!' +
   ' - BECOME A MEMBER TO GET ALL YOUR MESSAGES HIGHLIGHTED IN CHAT! CLICK THE JOIN BUTTON NEXT TO THE SUBSCRIBE BUTTON TO JOIN!';
 
+// ─ FLARE NEWS FEED ─────────────────────────────────────────────────────────
+// Data lives in src/flareNewsData.js — edit that file to add entries.
+
+const _fmtNameList = arr =>
+  arr.length === 1 ? arr[0] :
+  arr.slice(0, -1).join(", ") + " and " + arr[arr.length - 1];
+
+const getFlareNewsMessage = (clockTime) => {
+  const DEFAULT_WINDOW_MS = 336 * 3600000; // 2 weeks
+  const TWO_DAYS = 2 * 86400000;
+
+  const past = FLARE_NEWS_ENTRIES.filter(e => e.ms <= clockTime);
+  const withinWindow = past.filter(e => {
+    const win = e.windowHours != null ? e.windowHours * 3600000 : DEFAULT_WINDOW_MS;
+    return clockTime - e.ms <= win;
+  });
+  const news = withinWindow;
+
+  const showPromos = clockTime >= PROMO_DISPLAY_START_MS;
+  const recentPromos = showPromos
+    ? FLARE_PROMOTIONS.filter(e => e.ms <= clockTime && clockTime - e.ms <= TWO_DAYS)
+    : [];
+  const pdpBy = [...new Set(recentPromos.filter(e => e.channel === 'pdp').map(e => e.by))];
+  const tsBy  = [...new Set(recentPromos.filter(e => e.channel === 'ts').map(e => e.by))];
+
+  const parts = [
+    "This is a replica of FlareTV's PewDiePie vs T-Series Live Sub Count stream, using subscriber data taken from livestreams of the battle at the time, every second.",
+    "This stream is powered by FlareTV and Youtube Realtime by Akshat Mittal",
+    ...news.map(e => e.label ? e.label + " - " + e.text : e.text),
+    ...(showPromos ? [
+      pdpBy.length > 0
+        ? "PewDiePie was recently promoted by " + _fmtNameList(pdpBy)
+        : "PewDiePie has received no promotions lately",
+      ...(tsBy.length > 0 ? ["T-Series was recently promoted by " + _fmtNameList(tsBy)] : []),
+    ] : []),
+  ];
+  const msg = parts.join(" - ");
+  return clockTime < Date.UTC(2019, 2, 12, 0, 0, 0) ? msg.toUpperCase() : msg;
+};
+
 // LAYOUT: Flare - see LAYOUTS.md
-const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1, playing = true }) => {
+const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1, playing = true, newsFeed = true }) => {
   // Natural (unscaled) width of a single message copy. Measured once
   // after mount and again whenever the message string changes.
   const [textW, setTextW] = useState(0);
   const innerRef = useRef(null);
 
-  const message = getFlareTickerMessage();
+  const message = newsFeed ? getFlareNewsMessage(clockTime) : getFlareTickerMessage();
 
   useLayoutEffect(() => {
     if (!innerRef.current) return;
@@ -2654,6 +2708,7 @@ const FlareView = React.memo(({
   playing = true,
   scale = 1,
   rareBannerUpd = false,
+  newsFeed = true,
 }) => {
   // Local copy of the dashboard's fmtLeadDuration - same shape, same
   // rounding, so the Flare "Time ahead:" readout reads identically to the
@@ -3161,6 +3216,7 @@ const FlareView = React.memo(({
         robotoFont={robotoFont}
         mult={mult}
         playing={playing}
+        newsFeed={newsFeed}
       />
 
       {/* Sub-gap box - 427x118 at (427,597), 4px rounded. Horizontally
@@ -4229,6 +4285,7 @@ export default function SocialBladeLive() {
   // Dashboard's 1-MIN / 1-HOUR / 1-DAY sub-gain stack above the crown on each
   // channel card. Extra Info is only meaningful when the Flare view is active.
   const [flareDark, setFlareDark] = useState(() => _ss.flareDark ?? false);
+  const [flareNewsFeed, setFlareNewsFeed] = useState(() => _ss.flareNewsFeed ?? true);
   const [sbDark, setSbDark] = useState(() => _ss.sbDark ?? true);
   const [sbOvertake, setSbOvertake] = useState(() => _ss.sbOvertake ?? false);
   // SB region background colors. Charts/center always black per design. Cards use SB site palette in light mode.
@@ -4298,7 +4355,7 @@ export default function SocialBladeLive() {
     _saveSS({ speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval });
   }, [speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval]);
   useEffect(() => {
-    _saveSS({ view, dashWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
+    _saveSS({ view, dashWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
   }, [view, dashWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
   useEffect(() => {
     const id = setInterval(() => { _saveSS({ pos: posRef.current }); }, 3000);
@@ -6489,56 +6546,56 @@ export default function SocialBladeLive() {
         {menuOpen && <div style={{ padding:"4px 14px 6px", display:"flex", alignItems:"stretch", gap:0, flexWrap:"nowrap" }}>
 
           {/* PLAY */}
-          <div style={{display:"flex",flexDirection:"column",gap:3,paddingRight:10}}>
-            <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>PLAY</span>
-            <div style={{display:"flex",alignItems:"center",gap:3}}>
-              <button onClick={()=>dispatch({type:"TOGGLE_PLAY"})} style={{ background:playing?"#162036":"#162016", color:playing?"#6baee8":"#5dba6e", border:"none", borderRadius:5, padding:"3px 12px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", minWidth:40 }}>{playing?"⏸":"▶"}</button>
-              <button onClick={()=>dispatch({type:"TOGGLE_REVERSE"})} title="Reverse playback" style={{ background:reverse?"#1e2535":"transparent", color:reverse?"#8aaccc":"#777", border:"1px solid "+(reverse?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"3px 7px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{"◀"}</button>
+          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
+            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>PLAY</span>
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              <button onClick={()=>dispatch({type:"TOGGLE_PLAY"})} style={{ background:playing?"#162036":"#162016", color:playing?"#6baee8":"#5dba6e", border:"none", borderRadius:5, padding:"5px 14px", fontWeight:700, fontSize:15, cursor:"pointer", fontFamily:"inherit", minWidth:44 }}>{playing?"⏸":"▶"}</button>
+              <button onClick={()=>dispatch({type:"TOGGLE_REVERSE"})} title="Reverse playback" style={{ background:reverse?"#1e2535":"transparent", color:reverse?"#8aaccc":"#777", border:"1px solid "+(reverse?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"5px 10px", fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>{"◀"}</button>
             </div>
           </div>
 
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
           {/* SPEED */}
-          <div style={{display:"flex",flexDirection:"column",gap:3,paddingRight:10}}>
-            <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>SPEED</span>
-            <div style={{display:"flex",alignItems:"center",gap:5}}>
-              <select value={speedMode} onChange={e=>{dispatch({type:"SET_MODE",mode:e.target.value});e.target.blur();}} style={{ background:"#0e1018", color:"#aaa", border:"1px solid #1e1e1e", borderRadius:4, padding:"2px 4px", fontSize:11, fontFamily:"inherit", cursor:"pointer", outline:"none" }}>
+          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
+            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SPEED</span>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <select value={speedMode} onChange={e=>{dispatch({type:"SET_MODE",mode:e.target.value});e.target.blur();}} style={{ background:"#0e1018", color:"#aaa", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 6px", fontSize:12, fontFamily:"inherit", cursor:"pointer", outline:"none" }}>
                 {ALL_MODES.map(m=><option key={m.key} value={m.key}>{m.label}</option>)}
               </select>
-              {isRTMode && <div style={{display:"flex",flexDirection:"column",gap:1}}>
-                <span style={{fontSize:9,color:"#666",letterSpacing:"0.03em"}}>Counter Update Interval</span>
-                <div style={{display:"flex",alignItems:"center",gap:2}}>
-                  <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:80,accentColor:"#4a6080",cursor:"pointer"}}/>
-                  <span style={{fontSize:9,color:"#888",minWidth:12}}>{rtInterval}s</span>
+              {isRTMode && <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                <span style={{fontSize:11,color:"#777",letterSpacing:"0.03em"}}>Counter Update Interval</span>
+                <div style={{display:"flex",alignItems:"center",gap:3}}>
+                  <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:100,accentColor:"#4a6080",cursor:"pointer"}}/>
+                  <span style={{fontSize:11,color:"#999",minWidth:16}}>{rtInterval}s</span>
                 </div>
               </div>}
               {/* Mult slider in log10-space: -1..2 = 0.1x..100x; 0 = 1x centered */}
-              <div style={{display:"flex",flexDirection:"column",gap:1}}>
-                <span style={{fontSize:9,color:"#666",letterSpacing:"0.03em"}}>Playback Speed</span>
+              <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                <span style={{fontSize:11,color:"#777",letterSpacing:"0.03em"}}>Playback Speed</span>
                 <div style={{display:"flex",alignItems:"center",gap:5}}>
-                  <input type="range" min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()} style={{width:68,accentColor:"#4a6080",cursor:"pointer"}}/>
+                  <input type="range" min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()} style={{width:80,accentColor:"#4a6080",cursor:"pointer"}}/>
                   <input ref={multInputRef} type="text" inputMode="decimal" value={multText}
                     onChange={e=>{ const s=e.target.value; setMultText(s); const v=parseFloat(s); if(!isNaN(v)&&v>=MULT_MIN&&v<=MULT_MAX)dispatch({type:"SET_MULT",mult:v}); }}
                     onBlur={()=>setMultText(String(parseFloat(mult.toFixed(2))))}
                     onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
-                    style={{width:36,background:"#0e1018",color:mult!==1?"#bbb":"#888",border:"1px solid #1e1e1e",borderRadius:4,padding:"2px 4px",fontSize:11,fontFamily:"inherit",textAlign:"right",outline:"none",fontVariantNumeric:"tabular-nums"}}/>
-                  <span style={{fontSize:10,color:mult!==1?"#888":"#777"}}>x</span>
+                    style={{width:40,background:"#0e1018",color:mult!==1?"#bbb":"#888",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 5px",fontSize:12,fontFamily:"inherit",textAlign:"right",outline:"none",fontVariantNumeric:"tabular-nums"}}/>
+                  <span style={{fontSize:12,color:mult!==1?"#888":"#777"}}>x</span>
                 </div>
               </div>
               {/* Dynamic: getDynSpeed drives rAF-paced playhead at gap-dependent rate */}
-              {speedMode==="1m" && <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 6px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Dynamic<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>}
+              {speedMode==="1m" && <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Dynamic<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>}
             </div>
           </div>
 
           {/* PHASE (RT modes only) */}
           {isRTSpeedMode(speedMode) && <>
             <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-            <div style={{display:"flex",flexDirection:"column",gap:3,paddingRight:10}} title="Phase-shift PT/TT counter updates; SB lands at midpoint">
-              <span style={{fontSize:10,color:"#888",letterSpacing:"0.04em"}}>Counters Desync Shift</span>
+            <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}} title="Phase-shift PT/TT counter updates; SB lands at midpoint">
+              <span style={{fontSize:12,color:"#888",letterSpacing:"0.04em"}}>Counters Desync Shift</span>
               <div style={{display:"flex",alignItems:"center",gap:4}}>
-                <input type="range" min={0} max={1} step={0.01} value={desync} onChange={e=>dispatch({type:"SET_DESYNC",value:parseFloat(e.target.value)})} onMouseUp={e=>e.target.blur()} style={{width:60,accentColor:"#4a6080",cursor:"pointer"}}/>
-                <span style={{fontSize:10,color:"#888",fontVariantNumeric:"tabular-nums",minWidth:24,textAlign:"right"}}>{desync.toFixed(2)}</span>
+                <input type="range" min={0} max={1} step={0.01} value={desync} onChange={e=>dispatch({type:"SET_DESYNC",value:parseFloat(e.target.value)})} onMouseUp={e=>e.target.blur()} style={{width:70,accentColor:"#4a6080",cursor:"pointer"}}/>
+                <span style={{fontSize:12,color:"#888",fontVariantNumeric:"tabular-nums",minWidth:28,textAlign:"right"}}>{desync.toFixed(2)}</span>
               </div>
             </div>
           </>}
@@ -6546,33 +6603,33 @@ export default function SocialBladeLive() {
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
           {/* SEEK */}
-          <div style={{display:"flex",flexDirection:"column",gap:3,flex:1,minWidth:120}}>
-            <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>SEEK</span>
+          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,flex:1,minWidth:140}}>
+            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SEEK</span>
             <div style={{display:"flex",alignItems:"center",gap:6}}>
               <input type="range" min={SEEK_START} max={effectiveMaxIdx} step="any" value={pos} onChange={e=>{const v=+e.target.value;setPos(v);posRef.current=v;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});if(musicArrowSeek)musicPickRandom(false);}} onMouseUp={e=>e.target.blur()} onTouchEnd={e=>e.target.blur()} style={{flex:1,accentColor:"#4a6080",cursor:"pointer"}}/>
               {clockEditing
                 ? <input type="datetime-local" step={1} autoFocus defaultValue={fmtDateTimeLocalET(curTime)} min={fmtDateTimeLocalET(REAL_DATA_START_MS)} max={fmtDateTimeLocalET(REAL_DATA_END_MS)}
                     onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
                     onBlur={e=>{ const ts=parseDateTimeLocalET(e.target.value); if(ts!=null){const cl=Math.max(REAL_DATA_START_MS,Math.min(REAL_DATA_END_MS,ts));const p=tsToPos(cl);setPos(p);posRef.current=p;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});} setClockEditing(false); }}
-                    style={{fontSize:11,background:"#0e1018",color:"#bbb",border:"1px solid #2d4060",borderRadius:4,padding:"2px 4px",fontFamily:"inherit",outline:"none",colorScheme:"dark"}}/>
-                : <span onClick={()=>setClockEditing(true)} title="Click to jump to date/time" style={{fontSize:11,color:"#999",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",cursor:"pointer",padding:"1px 5px",background:"#0e1018",borderRadius:3,border:"1px solid #1a1d28",width:132,display:"inline-block",textAlign:"center"}}>{fmtDateTime(curTime)}</span>}
-              <span ref={fpsDisplayRef} style={{fontSize:9,color:"#666",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",width:40,textAlign:"right",display:"inline-block"}}>-- fps</span>
+                    style={{fontSize:12,background:"#0e1018",color:"#bbb",border:"1px solid #2d4060",borderRadius:4,padding:"3px 5px",fontFamily:"inherit",outline:"none",colorScheme:"dark"}}/>
+                : <span onClick={()=>setClockEditing(true)} title="Click to jump to date/time" style={{fontSize:13,color:"#999",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",cursor:"pointer",padding:"2px 6px",background:"#0e1018",borderRadius:3,border:"1px solid #1a1d28",width:140,display:"inline-block",textAlign:"center"}}>{fmtDateTime(curTime)}</span>}
+              <span ref={fpsDisplayRef} style={{fontSize:11,color:"#666",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",width:44,textAlign:"right",display:"inline-block"}}>-- fps</span>
             </div>
-            <div style={{display:"flex",gap:16}}>
-              <span style={{fontSize:10,color:"#aaa"}}>H — hide/show bar</span>
-              <span style={{fontSize:10,color:"#aaa"}}>Space — play/pause</span>
+            <div style={{display:"flex",gap:20}}>
+              <span style={{fontSize:12,color:"#aaa"}}>H — hide/show bar</span>
+              <span style={{fontSize:12,color:"#aaa"}}>Space — play/pause</span>
             </div>
           </div>
 
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
           {/* VIEW */}
-          <div style={{display:"flex",flexDirection:"column",gap:3,paddingRight:10}}>
-            <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>VIEW</span>
+          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
+            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>VIEW</span>
             <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:5,overflow:"hidden"}}>
               {[{id:"socialblade",label:"SocialBlade"},{id:"flare",label:"Flare"},{id:"dashboard",label:"Dashboard"}].map((opt,i)=>{
                 const active=view===opt.id;
-                return <button key={opt.id} onClick={()=>setView(opt.id)} style={{ background:active?"#1e3050":"transparent", color:active?"#7cb9f7":"#777", border:"none", borderLeft:i===0?"none":"1px solid #1e1e1e", padding:"2px 9px", fontSize:11, cursor:"pointer", fontFamily:"inherit", fontWeight:active?600:400 }}>{opt.label}</button>;
+                return <button key={opt.id} onClick={()=>setView(opt.id)} style={{ background:active?"#1e3050":"transparent", color:active?"#7cb9f7":"#777", border:"none", borderLeft:i===0?"none":"1px solid #1e1e1e", padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:active?600:400 }}>{opt.label}</button>;
               })}
             </div>
           </div>
@@ -6580,21 +6637,22 @@ export default function SocialBladeLive() {
           {/* OPTIONS (view-specific) */}
           {(view==="dashboard" || view==="flare" || view==="socialblade") && <>
             <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-            <div style={{display:"flex",flexDirection:"column",gap:3,paddingRight:10}}>
-              <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>{view==="dashboard"?"DASHBOARD":view==="flare"?"FLARE":"SOCIALBLADE"}</span>
-              <div style={{display:"flex",alignItems:"center",gap:4}}>
-                {view==="dashboard" && <button onClick={()=>setDashLayout(v=>(v+1)%3)} style={{ background:"#1a2535", color:"#9bbfdf", border:"1px solid #2d4060", borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>{dashLayout===0?"Default":dashLayout===1?"Default+":"Alt"}</button>}
-                {view==="dashboard" && <button onClick={()=>setFilterAudits(v=>!v)} title="Strip audits from charts; mark audit timestamps" style={{ background:filterAudits?"#1a2535":"transparent", color:filterAudits?"#9bbfdf":"#777", border:"1px solid "+(filterAudits?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Filter Audits</button>}
+            <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
+              <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>{view==="dashboard"?"DASHBOARD":view==="flare"?"FLARE":"SOCIALBLADE"}</span>
+              <div style={{display:"flex",alignItems:"center",gap:5}}>
+                {view==="dashboard" && <button onClick={()=>setDashLayout(v=>(v+1)%3)} style={{ background:"#1a2535", color:"#9bbfdf", border:"1px solid #2d4060", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{dashLayout===0?"Default":dashLayout===1?"Default+":"Alt"}</button>}
+                {view==="dashboard" && <button onClick={()=>setFilterAudits(v=>!v)} title="Strip audits from charts; mark audit timestamps" style={{ background:filterAudits?"#1a2535":"transparent", color:filterAudits?"#9bbfdf":"#777", border:"1px solid "+(filterAudits?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Filter Audits</button>}
                 {view==="dashboard" && <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
                   {[['both','Both'],['pdp','PDP'],['ts','TS']].map(([v,lbl])=>(
-                    <button key={v} onClick={()=>setDashChanFilter(v)} style={{background:dashChanFilter===v?"#1a2535":"transparent",color:dashChanFilter===v?"#9bbfdf":"#777",border:"none",borderLeft:v==='both'?"none":"1px solid #1e1e1e",padding:"2px 8px",fontSize:10,cursor:"pointer",fontFamily:"inherit",fontWeight:dashChanFilter===v?600:400}}>{lbl}</button>
+                    <button key={v} onClick={()=>setDashChanFilter(v)} style={{background:dashChanFilter===v?"#1a2535":"transparent",color:dashChanFilter===v?"#9bbfdf":"#777",border:"none",borderLeft:v==='both'?"none":"1px solid #1e1e1e",padding:"4px 10px",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:dashChanFilter===v?600:400}}>{lbl}</button>
                   ))}
                 </div>}
 
-                {view==="flare" && <button onClick={()=>setFlareDark(v=>!v)} style={{ background:flareDark?"#1a2535":"transparent", color:flareDark?"#9bbfdf":"#777", border:"1px solid "+(flareDark?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>{flareDark?"Dark":"Light"}</button>}
-                {view==="socialblade" && <button onClick={()=>setSbDark(v=>!v)} style={{ background:!sbDark?"#1a2535":"transparent", color:!sbDark?"#9bbfdf":"#777", border:"1px solid "+(!sbDark?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>{sbDark?"Light":"Dark"}</button>}
-                {view==="socialblade" && <button onClick={()=>setSbOvertake(v=>!v)} style={{ background:sbOvertake?"#1a2535":"transparent", color:sbOvertake?"#9bbfdf":"#777", border:"1px solid "+(sbOvertake?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Predict Overtake</button>}
-                {view==="socialblade" && <button onClick={()=>dispatch({type:"TOGGLE_MINUTE_SNAP"})} title="Update tables once every minute - otherwise, updates every second" style={{ background:minuteSnap?"#1a2535":"transparent", color:minuteSnap?"#7cb9f7":"#777", border:"1px solid "+(minuteSnap?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Snap</button>}
+                {view==="flare" && <button onClick={()=>setFlareDark(v=>!v)} style={{ background:"transparent", color:"#999", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{flareDark?"Light Mode":"Dark Mode"}</button>}
+                {view==="flare" && <button onClick={()=>setFlareNewsFeed(v=>!v)} style={{ background:flareNewsFeed?"#1a2535":"transparent", color:flareNewsFeed?"#7cb9f7":"#777", border:"1px solid "+(flareNewsFeed?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>News Feed</button>}
+                {view==="socialblade" && <button onClick={()=>setSbDark(v=>!v)} style={{ background:"transparent", color:"#999", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{sbDark?"Light Mode":"Dark Mode"}</button>}
+                {view==="socialblade" && <button onClick={()=>setSbOvertake(v=>!v)} style={{ background:sbOvertake?"#1a2535":"transparent", color:sbOvertake?"#9bbfdf":"#777", border:"1px solid "+(sbOvertake?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Predict Overtake</button>}
+                {view==="socialblade" && <button onClick={()=>dispatch({type:"TOGGLE_MINUTE_SNAP"})} title="Update tables once every minute - otherwise, updates every second" style={{ background:minuteSnap?"#1a2535":"transparent", color:minuteSnap?"#7cb9f7":"#777", border:"1px solid "+(minuteSnap?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Snap</button>}
               </div>
             </div>
           </>}
@@ -6602,24 +6660,24 @@ export default function SocialBladeLive() {
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
           {/* DEV (dev mode only, toggle with Shift+H) */}
-          {devMode && <div style={{display:"flex",flexDirection:"column",gap:3}}>
-            <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>DEV</span>
-            <div style={{display:"flex",alignItems:"center",gap:4}}>
-              <button onClick={()=>{ setInspectorOpen(v=>!v); if(!inspectorPinned) setInspectorPinnedTime(curTime); }} style={{ background:inspectorOpen?"#1e3050":"transparent", color:inspectorOpen?"#7cb9f7":"#777", border:"1px solid "+(inspectorOpen?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Data</button>
-              <button onClick={()=>setRawMode(v=>!v)} title={rawMode?"Switch to smoothed data":"Switch to raw unfiltered data"} style={{ background:rawMode?"#301818":"transparent", color:rawMode?"#f88":"#777", border:"1px solid "+(rawMode?"#603030":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>{rawMode?"Raw":"Smooth"}</button>
-              <button onClick={()=>setPatchEditorOpen(v=>!v)} title="Edit manual data patches (audit marks and smooth windows)" style={{ background:patchEditorOpen?"#1e3020":"transparent", color:patchEditorOpen?"#7fdf9b":"#777", border:"1px solid "+(patchEditorOpen?"#2d6040":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Patches{(patches.audit_invalidations.length+patches.smooth_windows.length)>0?" ("+(patches.audit_invalidations.length+patches.smooth_windows.length)+")":""}</button>
-              {view==="dashboard" && <button onClick={()=>setDashRawDelta(v=>!v)} title="Replace last chart slot with Raw-minus-Smooth delta for both channels (last 1h)" style={{ background:dashRawDelta?"#1e1535":"transparent", color:dashRawDelta?"#b88cf7":"#777", border:"1px solid "+(dashRawDelta?"#4d2d9a":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Delta</button>}
+          {devMode && <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4}}>
+            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DEV</span>
+            <div style={{display:"flex",alignItems:"center",gap:5}}>
+              <button onClick={()=>{ setInspectorOpen(v=>!v); if(!inspectorPinned) setInspectorPinnedTime(curTime); }} style={{ background:inspectorOpen?"#1e3050":"transparent", color:inspectorOpen?"#7cb9f7":"#777", border:"1px solid "+(inspectorOpen?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Data</button>
+              <button onClick={()=>setRawMode(v=>!v)} title={rawMode?"Switch to smoothed data":"Switch to raw unfiltered data"} style={{ background:rawMode?"#301818":"transparent", color:rawMode?"#f88":"#777", border:"1px solid "+(rawMode?"#603030":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{rawMode?"Raw":"Smooth"}</button>
+              <button onClick={()=>setPatchEditorOpen(v=>!v)} title="Edit manual data patches (audit marks and smooth windows)" style={{ background:patchEditorOpen?"#1e3020":"transparent", color:patchEditorOpen?"#7fdf9b":"#777", border:"1px solid "+(patchEditorOpen?"#2d6040":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Patches{(patches.audit_invalidations.length+patches.smooth_windows.length)>0?" ("+(patches.audit_invalidations.length+patches.smooth_windows.length)+")":""}</button>
+              {view==="dashboard" && <button onClick={()=>setDashRawDelta(v=>!v)} title="Replace last chart slot with Raw-minus-Smooth delta for both channels (last 1h)" style={{ background:dashRawDelta?"#1e1535":"transparent", color:dashRawDelta?"#b88cf7":"#777", border:"1px solid "+(dashRawDelta?"#4d2d9a":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Delta</button>}
             </div>
           </div>}
 
           {devMode && <>
             <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
             {/* WINDOW */}
-            <div style={{display:"flex",flexDirection:"column",gap:3}}>
-              <span style={{fontSize:13,color:"#888",letterSpacing:"0.05em"}}>WINDOW</span>
+            <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4}}>
+              <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>WINDOW</span>
               <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
-                <button onClick={()=>{ setScale(1); window.resizeTo(1280,720+(window.outerHeight-window.innerHeight)); }} title="Resize to 1280x720 viewport" style={{ background:scale===1?"#1e2535":"transparent", color:scale===1?"#aaa":"#777", border:"none", borderRight:"1px solid #1e1e1e", padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>720p</button>
-                <button onClick={()=>{ setScale(1.5); window.resizeTo(1920,1080+(window.outerHeight-window.innerHeight)); }} title="Render Flare at 1920x1080" style={{ background:scale===1.5?"#1e2535":"transparent", color:scale===1.5?"#aaa":"#777", border:"none", padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:"inherit" }}>1080p</button>
+                <button onClick={()=>{ setScale(1); window.resizeTo(1280,720+(window.outerHeight-window.innerHeight)); }} title="Resize to 1280x720 viewport" style={{ background:scale===1?"#1e2535":"transparent", color:scale===1?"#aaa":"#777", border:"none", borderRight:"1px solid #1e1e1e", padding:"4px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>720p</button>
+                <button onClick={()=>{ setScale(1.5); window.resizeTo(1920,1080+(window.outerHeight-window.innerHeight)); }} title="Render Flare at 1920x1080" style={{ background:scale===1.5?"#1e2535":"transparent", color:scale===1.5?"#aaa":"#777", border:"none", padding:"4px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>1080p</button>
               </div>
             </div>
           </>}
@@ -7223,6 +7281,7 @@ export default function SocialBladeLive() {
             isRTMode={isRTMode}
             rtPeriodSec={rtPeriodSec}
             dark={flareDark}
+            newsFeed={flareNewsFeed}
             extraInfo={flareExtraInfo}
             subsPerMinTable={subsPerMinTable}
             leadMs={flareLeadMs}
