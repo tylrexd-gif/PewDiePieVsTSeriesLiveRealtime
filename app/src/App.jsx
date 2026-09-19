@@ -6509,7 +6509,7 @@ export default function SocialBladeLive() {
               {isRTMode && <div style={{display:"flex",flexDirection:"column",gap:1}}>
                 <span style={{fontSize:9,color:"#666",letterSpacing:"0.03em"}}>Counter Update Interval</span>
                 <div style={{display:"flex",alignItems:"center",gap:2}}>
-                  <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:34,accentColor:"#4a6080",cursor:"pointer"}}/>
+                  <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:80,accentColor:"#4a6080",cursor:"pointer"}}/>
                   <span style={{fontSize:9,color:"#888",minWidth:12}}>{rtInterval}s</span>
                 </div>
               </div>}
@@ -6607,6 +6607,11 @@ export default function SocialBladeLive() {
               {view==="dashboard" && <button onClick={()=>setDashRawDelta(v=>!v)} title="Replace last chart slot with Raw-minus-Smooth delta for both channels (last 1h)" style={{ background:dashRawDelta?"#1e1535":"transparent", color:dashRawDelta?"#b88cf7":"#777", border:"1px solid "+(dashRawDelta?"#4d2d9a":"#1e1e1e"), borderRadius:4, padding:"2px 7px", fontSize:10, cursor:"pointer", fontFamily:"inherit" }}>Delta</button>}
             </div>
           </div>}
+
+          <div style={{marginLeft:"auto",display:"flex",flexDirection:"column",justifyContent:"center",gap:3,paddingLeft:14,opacity:0.45}}>
+            <span style={{fontSize:9,color:"#888",whiteSpace:"nowrap"}}>H — hide/show bar</span>
+            <span style={{fontSize:9,color:"#888",whiteSpace:"nowrap"}}>Space — play/pause</span>
+          </div>
 
           {devMode && <>
             <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
