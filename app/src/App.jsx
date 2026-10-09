@@ -4028,9 +4028,16 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
     return visIdx.map(i => all[i]);
   }, [ready, spec.kind, lbSec, spec.strip, visKey]);
 
+  // First build waits for the open animation; later rebuilds (Filter Audits toggled) run at once.
+  // pyr is cleared first so the old index is never drawn against the new values.
+  const pyrBuiltRef = useRef(false);
   useEffect(() => {
     if (!ready) return;
-    const id = setTimeout(() => setPyr(_expPyramid(spec.kind, lbSec, spec.strip)), EXPAND_MS + 40);
+    setPyr(null);
+    const id = setTimeout(() => {
+      setPyr(_expPyramid(spec.kind, lbSec, spec.strip));
+      pyrBuiltRef.current = true;
+    }, pyrBuiltRef.current ? 30 : EXPAND_MS + 40);
     return () => clearTimeout(id);
   }, [ready, spec.kind, lbSec, spec.strip]);
 
@@ -6614,7 +6621,7 @@ export default function SocialBladeLive() {
   const openExplorer = (spec) => (rect) => {
     expWasPlayingRef.current = pb.playing;
     if (pb.playing) dispatch({ type: "STOP" });
-    setExplorer({ ...spec, t0: Math.max(spec.t0, REAL_DATA_START_MS), strip: effectiveFilterAudits, rect, closing: false });
+    setExplorer({ ...spec, t0: Math.max(spec.t0, REAL_DATA_START_MS), rect, closing: false });
   };
   const openGainExplorer = (lbSec, t0) => {
     const lbl = lbSec < 60 ? lbSec + "s" : lbSec < 3600 ? (lbSec / 60) + "min" : (lbSec / 3600) + "hr";
@@ -6634,7 +6641,7 @@ export default function SocialBladeLive() {
   }, [view]);
   const renderExplorerOverlay = (barH) => explorer && createPortal(
     <DashExpandOverlay rect={explorer.rect} top={barH} closing={explorer.closing} onClose={closeExplorer} onClosed={finishExplorer}>
-      <ChartExplorer spec={explorer} curTime={curTime} ready={realDataReady} onClose={closeExplorer} dc={eDC} dev={devMode} chan={dashChanFilter}/>
+      <ChartExplorer spec={{ ...explorer, strip: explorer.kind === "gain" && effectiveFilterAudits }} curTime={curTime} ready={realDataReady} onClose={closeExplorer} dc={eDC} dev={devMode} chan={dashChanFilter}/>
     </DashExpandOverlay>,
     document.body);
 
