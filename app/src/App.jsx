@@ -220,7 +220,7 @@ const _gaussPair = (rng) => {
 };
 
 const _fmtAuditDisplayTime = (ts) => {
-  const d = new Date(ts + _getEasternOffset(ts) * 3600000);
+  const d = new Date(ts + _getDisplayOffset(ts) * 3600000);
   const yr = d.getUTCFullYear();
   const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
   const dy = String(d.getUTCDate()).padStart(2, '0');
@@ -798,30 +798,28 @@ const fmtAuto = (v) => {
   return Math.round(v).toLocaleString();
 };
 const fmtDate = (ts) => new Date(ts).toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"});
+// Playback clock and date-jump box, in the selected display time zone.
+const _p2c = (n) => String(n).padStart(2, "0");
 const fmtDateTime = (ts) => {
-  const d = new Date(ts);
-  return d.toLocaleDateString("en-US",{timeZone:"America/New_York",month:"short",day:"numeric"})+" "+
-    d.toLocaleTimeString("en-US",{timeZone:"America/New_York",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})+" ET";
+  const d = new Date(ts + _getDisplayOffset(ts) * 3600000);
+  const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
+  return `${mon} ${d.getUTCDate()} ${_p2c(d.getUTCHours())}:${_p2c(d.getUTCMinutes())}:${_p2c(d.getUTCSeconds())} ${_dispTzLabel(ts)}`;
 };
 
 const fmtDateTimeLocalET = (ts) => {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone:"America/New_York", year:"numeric", month:"2-digit", day:"2-digit",
-    hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false
-  }).formatToParts(new Date(ts));
-  const g = t => parts.find(p=>p.type===t).value;
-  return `${g("year")}-${g("month")}-${g("day")}T${g("hour")}:${g("minute")}:${g("second")}`;
+  const d = new Date(ts + _getDisplayOffset(ts) * 3600000);
+  return `${d.getUTCFullYear()}-${_p2c(d.getUTCMonth() + 1)}-${_p2c(d.getUTCDate())}T${_p2c(d.getUTCHours())}:${_p2c(d.getUTCMinutes())}:${_p2c(d.getUTCSeconds())}`;
 };
 const parseDateTimeLocalET = (s) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(s||"");
   if (!m) return null;
   const base = Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], m[6]?+m[6]:0);
-  for (const off of [-4, -5]) {
+  const candidates = _dispTz === "IST" ? [5.5] : _dispTz === "GMT" ? [1, 0] : [-4, -5];
+  for (const off of candidates) {
     const utc = base - off * 3600000;
-    const p = new Intl.DateTimeFormat("en-US", {timeZone:"America/New_York", hour:"numeric", minute:"numeric", hour12:false}).formatToParts(new Date(utc));
-    if (+p.find(x=>x.type==="hour").value === +m[4] && +p.find(x=>x.type==="minute").value === +m[5]) return utc;
+    if (_getDisplayOffset(utc) === off) return utc;
   }
-  return base + 5*3600000;
+  return base - candidates[candidates.length - 1] * 3600000;
 };
 const fmtSBTime = (ts, offsetHours) => {
   const d = new Date(ts + offsetHours * 3600000);
@@ -853,40 +851,45 @@ const _getUKOffset = (ts) => {
   const bstOff = Date.UTC(y, 9, _lastSunday(y, 9), 1, 0, 0);
   return (ts >= bstOn && ts < bstOff) ? 1 : 0;
 };
+// Display time zone for charts, ticks, tooltips, ETAs and the playback clock.
+// Set from the playback-bar switcher each render; city clocks keep their own zones.
+let _dispTz = "ET"; // "ET" | "GMT" (UK: GMT/BST) | "IST"
+const _getDisplayOffset = (ts) => _dispTz === "IST" ? 5.5 : _dispTz === "GMT" ? _getUKOffset(ts) : _getEasternOffset(ts);
+const _dispTzLabel = (ts) => _dispTz === "IST" ? "IST" : _dispTz === "GMT" ? (_getUKOffset(ts) === 1 ? "BST" : "GMT") : (_getEasternOffset(ts) === -4 ? "EDT" : "EST");
 
 // - CHART HELPERS (ported from old dashboard) -
 // All tick generators and formatters work in Eastern Time (ET), same as the Raleigh display.
 // Strategy: shift ts into ET-local space (ts + etOff*ms), use UTC arithmetic there, then
 // unshift back. etOff is recomputed each iteration so DST transitions mid-range are handled.
 const getMidnights = (tMin, tMax) => {
-  let etOff = _getEasternOffset(tMin) * 3600000;
+  let etOff = _getDisplayOffset(tMin) * 3600000;
   const d = new Date(tMin + etOff);
   d.setUTCHours(0, 0, 0, 0);
   if (d.getTime() < tMin + etOff) d.setUTCDate(d.getUTCDate() + 1);
   const ticks = [];
   while (true) {
     const tEt = d.getTime();
-    const realT = tEt - _getEasternOffset(tEt - etOff) * 3600000;
+    const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
     if (realT > tMax) break;
     ticks.push(realT);
-    etOff = _getEasternOffset(realT) * 3600000;
+    etOff = _getDisplayOffset(realT) * 3600000;
     d.setUTCDate(d.getUTCDate() + 1);
   }
   return ticks;
 };
 
 const get6HourTicks = (tMin, tMax) => {
-  let etOff = _getEasternOffset(tMin) * 3600000;
+  let etOff = _getDisplayOffset(tMin) * 3600000;
   const d = new Date(tMin + etOff);
   d.setUTCHours(Math.ceil(d.getUTCHours() / 6) * 6, 0, 0, 0);
   if (d.getTime() < tMin + etOff) d.setUTCHours(d.getUTCHours() + 6);
   const ticks = [];
   while (true) {
     const tEt = d.getTime();
-    const realT = tEt - _getEasternOffset(tEt - etOff) * 3600000;
+    const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
     if (realT > tMax) break;
     ticks.push(realT);
-    etOff = _getEasternOffset(realT) * 3600000;
+    etOff = _getDisplayOffset(realT) * 3600000;
     d.setUTCHours(d.getUTCHours() + 6);
   }
   return ticks;
@@ -908,7 +911,7 @@ const getAdaptiveDateTicks = (tMin, tMax) => {
   const spanHours = spanMs / HOUR_MS;
   const spanDays = spanMs / DAY_MS;
   const ticks = [];
-  let etOff = _getEasternOffset(tMin) * 3600000;
+  let etOff = _getDisplayOffset(tMin) * 3600000;
   const d = new Date(tMin + etOff);
 
   if (spanHours <= 3) {
@@ -921,10 +924,10 @@ const getAdaptiveDateTicks = (tMin, tMax) => {
     d.setUTCHours(Math.ceil(d.getUTCHours() / 2) * 2);
     while (true) {
       const tEt = d.getTime();
-      const realT = tEt - _getEasternOffset(tEt - etOff) * 3600000;
+      const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
       if (realT > tMax) break;
       ticks.push(realT);
-      etOff = _getEasternOffset(realT) * 3600000;
+      etOff = _getDisplayOffset(realT) * 3600000;
       d.setUTCHours(d.getUTCHours() + 2);
     }
   } else if (spanHours <= 48) {
@@ -933,10 +936,10 @@ const getAdaptiveDateTicks = (tMin, tMax) => {
     d.setUTCHours(Math.ceil(d.getUTCHours() / 6) * 6);
     while (true) {
       const tEt = d.getTime();
-      const realT = tEt - _getEasternOffset(tEt - etOff) * 3600000;
+      const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
       if (realT > tMax) break;
       ticks.push(realT);
-      etOff = _getEasternOffset(realT) * 3600000;
+      etOff = _getDisplayOffset(realT) * 3600000;
       d.setUTCHours(d.getUTCHours() + 6);
     }
   } else {
@@ -953,10 +956,10 @@ const getAdaptiveDateTicks = (tMin, tMax) => {
     }
     while (true) {
       const tEt = d.getTime();
-      const realT = tEt - _getEasternOffset(tEt - etOff) * 3600000;
+      const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
       if (realT > tMax) break;
       ticks.push(realT);
-      etOff = _getEasternOffset(realT) * 3600000;
+      etOff = _getDisplayOffset(realT) * 3600000;
       d.setUTCDate(d.getUTCDate() + interval);
     }
   }
@@ -3970,7 +3973,7 @@ const _expShift = (a, span) => {
   a = Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS - span, a));
   return [a, a + span];
 };
-const _expLocal = (t) => new Date(t + _getEasternOffset(t) * 3600000);
+const _expLocal = (t) => new Date(t + _getDisplayOffset(t) * 3600000);
 const _expFmtTick = (t, stepSec) => {
   const d = _expLocal(t);
   const midnight = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0;
@@ -3985,7 +3988,7 @@ const _expFmtRange = (t0, t1) => {
   const time = (d) => _p2(d.getUTCHours()) + ":" + _p2(d.getUTCMinutes()) + (secs ? ":" + _p2(d.getUTCSeconds()) : "");
   const a = _expLocal(t0), b = _expLocal(t1);
   const sameDay = day(a) === day(b);
-  return day(a) + " " + time(a) + " – " + (sameDay ? "" : day(b) + " ") + time(b) + " ET";
+  return day(a) + " " + time(a) + " – " + (sameDay ? "" : day(b) + " ") + time(b) + " " + _dispTz;
 };
 const _expFmtY = (v, kind, step) => {
   if (kind === "subs" && step >= 10000) return (v / 1e6).toFixed(step >= 1e6 ? 0 : step >= 1e5 ? 1 : 2) + "M";
@@ -4170,7 +4173,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
 
     const stepSec = EXP_X_STEPS.find((s) => s * 1000 / span * pw >= 95) || EXP_X_STEPS[EXP_X_STEPS.length - 1];
     const S = stepSec * 1000;
-    const offMs = _getEasternOffset(t0) * 3600000;
+    const offMs = _getDisplayOffset(t0) * 3600000;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     for (let t = Math.ceil((t0 + offMs) / S) * S - offMs; t <= t1; t += S) {
@@ -4260,7 +4263,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
   if (hover && hoverVals) {
     const dt = _expLocal(hover.t);
     const label = _MON3[dt.getUTCMonth()] + " " + dt.getUTCDate() + ", " + dt.getUTCFullYear() + "  " +
-      _p2(dt.getUTCHours()) + ":" + _p2(dt.getUTCMinutes()) + ":" + _p2(dt.getUTCSeconds()) + (_getEasternOffset(hover.t) === -4 ? " EDT" : " EST");
+      _p2(dt.getUTCHours()) + ":" + _p2(dt.getUTCMinutes()) + ":" + _p2(dt.getUTCSeconds()) + " " + _dispTzLabel(hover.t);
     const flip = hover.x > size.w - 240;
     tip = (
       <div style={{ position: "absolute", top: EXP_PAD.t + 8, left: flip ? undefined : hover.x + 14, right: flip ? size.w - hover.x + 14 : undefined, background: "#1e2130", border: "1px solid " + d.BORDER, borderRadius: 6, padding: "8px 12px", fontSize: 12, pointerEvents: "none", whiteSpace: "nowrap" }}>
@@ -4322,7 +4325,7 @@ const DashTooltip =({active,payload,label,fmtMode,dc,flare,flareDark}) => {
   const useLightBg = flare && !flareDark;
   const bg = useLightBg ? "#ffffff" : "#1e2130";
   const shadow = useLightBg ? "0 2px 8px rgba(0,0,0,0.08)" : "none";
-  const dt = new Date(label + _getEasternOffset(label) * 3600000);
+  const dt = new Date(label + _getDisplayOffset(label) * 3600000);
   const datePart = dt.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"});
   const timePart = dt.toLocaleTimeString("en-US",{timeZone:"UTC",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
   return (
@@ -4374,11 +4377,11 @@ const DashMilestone = ({pdpSubs,tsSubs,pdpDaily,tsDaily,curTime:ct,dc,flare,flar
   const fmtEta=(dt)=>{
     if(!dt)return"\u2014";
     const ts=dt.getTime();
-    const etOff=_getEasternOffset(ts);
+    const etOff=_getDisplayOffset(ts);
     const d=new Date(ts+etOff*3600000);
     const mon=d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"});
     const hr=d.getUTCHours();
-    return mon+" "+(hr%12||12)+(hr<12?"am":"pm")+" "+(etOff===-4?"EDT":"EST");
+    return mon+" "+(hr%12||12)+(hr<12?"am":"pm")+" "+_dispTzLabel(ts);
   };
   const renderBar=(label,val,color,gradStart,roundTop)=>{
     const next=val!=null?nextMs(val):null;
@@ -4770,6 +4773,9 @@ export default function SocialBladeLive() {
   const _ssRef = useRef(null);
   if (_ssRef.current === null) _ssRef.current = _loadSS();
   const _ss = _ssRef.current;
+  const [dispTz, setDispTz] = useState(() => _ss.dispTz ?? "ET");
+  _dispTz = dispTz; // module-level formatters read this during render
+  useEffect(() => { _saveSS({ dispTz }); }, [dispTz]);
   // When the Dynamic toggle is on, it overrides whatever base mode is
   // selected in the dropdown - playback advances via getDynSpeed and
   // none of the RT-tick / 1m / 1h paths fire. isRTMode and isDyn read
@@ -5207,7 +5213,7 @@ export default function SocialBladeLive() {
   const _domExtraCP = _rdCurRef ?? curPoint;
 
   const domGap1d  = useMemo(() => getRange(gap1dData,  ["g"], tMinGap1d, gapTime, _domExtraCP), [gap1dData,  tMinGap1d, gapTime, _domExtraCP]);
-  const ticksHist = useMemo(() => getAdaptiveDateTicks(tMinHist, gapTime), [tMinHist, gapTime]);
+  const ticksHist = useMemo(() => getAdaptiveDateTicks(tMinHist, gapTime), [tMinHist, gapTime, dispTz]);
   // Round Y-axis for the historical gap chart (V1 + V2 PDP/TS share this data).
   const histGapAxis = roundGapAxis(histGapData, _domExtraCP?.g);
 
@@ -5339,7 +5345,7 @@ export default function SocialBladeLive() {
       if (pdp && ts) break;
     }
     return { pdp, ts };
-  }, [tableTime, appMode]);
+  }, [tableTime, appMode, dispTz]);
 
   const musicArrowSeekRef = useRef(true);
   const skipMusicSyncRef = useRef(false);
@@ -5747,11 +5753,11 @@ export default function SocialBladeLive() {
   const fmtEta = (d) => {
     if (!d) return "\u2014";
     const ts = d.getTime();
-    const etOff = _getEasternOffset(ts);
+    const etOff = _getDisplayOffset(ts);
     const et = new Date(ts + etOff * 3600000);
     const mon = et.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"});
     const hr = et.getUTCHours();
-    return mon+" "+(hr%12||12)+(hr<12?"am":"pm")+" "+(etOff===-4?"EDT":"EST");
+    return mon+" "+(hr%12||12)+(hr<12?"am":"pm")+" "+_dispTzLabel(ts);
   };
   // When Min Snap is on, milestone predictions use the INTEGER-rounded 1-day
   // avg subs/min (the value actually displayed in the table's 24h cell -
@@ -5822,13 +5828,13 @@ export default function SocialBladeLive() {
 
   // Chart tick formatters — all display in Eastern Time (same as Raleigh clock)
   const fmt1hTick = (ts) => {
-    const d = new Date(ts + _getEasternOffset(ts) * 3600000);
+    const d = new Date(ts + _getDisplayOffset(ts) * 3600000);
     const h = d.getUTCHours(), m = d.getUTCMinutes();
     if (h === 0 && m === 0) return d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"});
     return String(h).padStart(2,"0") + ":" + String(m).padStart(2,"0");
   };
   const fmtHistTick = (ts) => {
-    const d = new Date(ts + _getEasternOffset(ts) * 3600000);
+    const d = new Date(ts + _getDisplayOffset(ts) * 3600000);
     const spanHours = (curTime - tMinHist) / HOUR_MS;
     const dateFmt = d.getUTCDate()+". "+d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short"});
     if (spanHours <= 12) return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0");
@@ -6528,7 +6534,7 @@ export default function SocialBladeLive() {
   const dashChartTicks = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts) return [];
     return thinMidnights(getMidnights(curTime - dashWin * DAY_MS, curTime), 8);
-  }, [view, dashShowCharts, curTime, dashWin]);
+  }, [view, dashShowCharts, curTime, dashWin, dispTz]);
 
   // LAYOUT: Dashboard counter helper - see LAYOUTS.md
   const dashRenderGap = (value) => {
@@ -6576,7 +6582,7 @@ export default function SocialBladeLive() {
     return <CasinoCounter value={value} duration={dur} seekToken={seekToken}/>;
   };
 
-  const dashXFormat = (ts) => { const d = new Date(ts + _getEasternOffset(ts) * 3600000); return d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"}); };
+  const dashXFormat = (ts) => { const d = new Date(ts + _getDisplayOffset(ts) * 3600000); return d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"}); };
 
   // - Shared dashboard chart renderers -
   // cfg fields (gain/gap charts):
@@ -6685,12 +6691,12 @@ export default function SocialBladeLive() {
     const midnightSetG = new Set(_shownMidnightsG);
     const allAxisTicksG = [tMin, curTime, ..._shownMidnightsG];
     const xFmtBase = span < 1
-      ? (ts => { const d=new Date(ts+_getEasternOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
+      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
       : span <= 24
-      ? (ts => { const d=new Date(ts+_getEasternOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0"); })
+      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0"); })
       : dashXFormat;
     const xFmt = ts => {
-      if (midnightSetG.has(ts)) { const d=new Date(ts+_getEasternOffset(ts)*3600000); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+' '+d.getUTCDate(); }
+      if (midnightSetG.has(ts)) { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+' '+d.getUTCDate(); }
       return xFmtBase(ts);
     };
     const cardControls = (
@@ -6740,12 +6746,12 @@ export default function SocialBladeLive() {
     const midnightSetGap = new Set(_shownMidnightsGap);
     const allAxisTicksGap = [tMin, curTime, ..._shownMidnightsGap];
     const xFmtBaseGap = span <= 1
-      ? (ts => { const d=new Date(ts+_getEasternOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
+      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
       : span <= 24
-      ? (ts => { const d=new Date(ts+_getEasternOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0"); })
+      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0"); })
       : dashXFormat;
     const xFmt = ts => {
-      if (midnightSetGap.has(ts)) { const d=new Date(ts+_getEasternOffset(ts)*3600000); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+' '+d.getUTCDate(); }
+      if (midnightSetGap.has(ts)) { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+' '+d.getUTCDate(); }
       return xFmtBaseGap(ts);
     };
     return (
@@ -6793,7 +6799,7 @@ export default function SocialBladeLive() {
     const pad = Math.max((hi - lo) * 0.08, 5);
     const dom = [lo - pad, hi + pad];
     const yTicks = niceTicks(dom, true);
-    const xFmt = ts => { const d = new Date(ts + _getEasternOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0'); };
+    const xFmt = ts => { const d = new Date(ts + _getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0'); };
     return (
       <DashChartCard title={title} dc={eDC}>
         <ResponsiveContainer width="100%" height="100%">
@@ -7232,12 +7238,20 @@ export default function SocialBladeLive() {
                     onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
                     onBlur={e=>{ const ts=parseDateTimeLocalET(e.target.value); if(ts!=null){const cl=Math.max(REAL_DATA_START_MS,Math.min(REAL_DATA_END_MS,ts));const p=tsToPos(cl);setPos(p);posRef.current=p;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});} setClockEditing(false); }}
                     style={{fontSize:12,background:"#0e1018",color:"#bbb",border:"1px solid #2d4060",borderRadius:4,padding:"3px 5px",fontFamily:"inherit",outline:"none",colorScheme:"dark"}}/>
-                : <span onClick={()=>setClockEditing(true)} title="Click to jump to date/time" style={{fontSize:13,color:"#999",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",cursor:"pointer",padding:"2px 6px",background:"#0e1018",borderRadius:3,border:"1px solid #1a1d28",width:140,display:"inline-block",textAlign:"center"}}>{fmtDateTime(curTime)}</span>}
+                : <span onClick={()=>setClockEditing(true)} title="Click to jump to date/time" style={{fontSize:13,color:"#999",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",cursor:"pointer",padding:"2px 6px",background:"#0e1018",borderRadius:3,border:"1px solid #1a1d28",width:150,display:"inline-block",textAlign:"center"}}>{fmtDateTime(curTime)}</span>}
               <span ref={fpsDisplayRef} style={{fontSize:11,color:"#666",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",width:44,textAlign:"right",display:"inline-block"}}>-- fps</span>
             </div>
-            <div style={{display:"flex",gap:20}}>
+            <div style={{display:"flex",gap:20,alignItems:"center"}}>
               <span style={{fontSize:12,color:"#aaa"}}>H — hide/show bar</span>
               <span style={{fontSize:12,color:"#aaa"}}>Space — play/pause</span>
+              {/* Display time zone: sits under the clock (right-aligned like it) */}
+              <div title="Time zone for the clock, charts, tooltips and estimates" style={{marginLeft:"auto",marginRight:50,width:164,display:"flex",justifyContent:"center"}}>
+                <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
+                  {["ET","GMT","IST"].map((z,i)=>(
+                    <button key={z} onClick={()=>setDispTz(z)} style={{background:dispTz===z?"#1a2535":"transparent",color:dispTz===z?"#9bbfdf":"#777",border:"none",borderLeft:i===0?"none":"1px solid #1e1e1e",padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:dispTz===z?600:400}}>{z}</button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -7565,7 +7579,7 @@ export default function SocialBladeLive() {
                   if (otGap != null && otGap <= 0) return "Passed";
                   if (subsPerMinTable.pdp[ri] == null || subsPerMinTable.ts[ri] == null || otGap == null || tr <= pr) return "";
                   const otMs = tableTime + (otGap / (tr - pr)) * 60000;
-                  const off = _getEasternOffset(otMs);
+                  const off = _getDisplayOffset(otMs);
                   const d = new Date(otMs + off * 3600000);
                   const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()];
                   const h = d.getUTCHours(), h12 = h % 12 || 12, ap = h < 12 ? 'am' : 'pm';
@@ -7582,7 +7596,7 @@ export default function SocialBladeLive() {
                 const wrapCell = (cs) => ({ ...cs, whiteSpace:"normal", lineHeight:1.2, height:42, maxHeight:42, verticalAlign:"middle", padding:"1px 3px" });
                 return (<>
                   <tr>
-                    <td colSpan={5} style={wrapCell({...cellStyle(323,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>T-Series Passes PewDiePie Estimate<br/>(Time Zone ET)</td>
+                    <td colSpan={5} style={wrapCell({...cellStyle(323,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>T-Series Passes PewDiePie Estimate<br/>(Time Zone {dispTz})</td>
                     {[4,5,6,7,8,9,10].map(ri => (
                       <td key={ri} style={wrapCell({...cellStyle(60,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>{fmtOT(ri)}</td>
                     ))}
@@ -7613,7 +7627,7 @@ export default function SocialBladeLive() {
           <table style={{ borderCollapse:"collapse", fontFamily:"Times New Roman, serif", fontSize:13, color:sbDark?"#fff":"#000", lineHeight:"17px" }}>
             <thead><tr>
               <th style={{...auditCellStyle("center",sbDark),fontWeight:"bold"}}>Name</th>
-              <th style={{...auditCellStyle("center",sbDark),fontWeight:"bold"}}>Audit Time (USA ET)</th>
+              <th style={{...auditCellStyle("center",sbDark),fontWeight:"bold"}}>Audit Time ({dispTz === "ET" ? "USA ET" : dispTz})</th>
               <th style={{...auditCellStyle("center",sbDark),fontWeight:"bold"}}>Change</th>
             </tr></thead>
             <tbody>
