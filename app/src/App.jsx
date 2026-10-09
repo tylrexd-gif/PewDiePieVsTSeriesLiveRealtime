@@ -3820,6 +3820,24 @@ const thinMidnights = (mids, max = 8) => {
   return mids.filter(m => Math.floor(m / DAY_MS) % s === 0);
 };
 
+// Hover affordance for explorable cards: magnifier cursor over the whole card (recharts
+// forces cursor:default on its wrapper, hence !important) and an instant "Click to explore" pill.
+const _exploreCss = `
+.dash-explore { position: relative; cursor: zoom-in; }
+.dash-explore .recharts-wrapper, .dash-explore .recharts-surface { cursor: zoom-in !important; }
+.dash-explore button { cursor: pointer; }
+.dash-explore-hint { position: absolute; top: 34px; left: 50%; transform: translateX(-50%); z-index: 5;
+  padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  background: rgba(30,33,48,0.92); border: 1px solid #3a4258; color: #c8cdd6; pointer-events: none;
+  opacity: 0; transition: opacity 120ms ease; white-space: nowrap; }
+.dash-explore:hover .dash-explore-hint { opacity: 1; }
+`;
+if (typeof document !== "undefined" && !document.getElementById("dash-explore-css")) {
+  const s = document.createElement("style");
+  s.id = "dash-explore-css";
+  s.textContent = _exploreCss;
+  document.head.appendChild(s);
+}
 const DashChartCard = React.memo(({title,children,dc,controls,onExpand}) => {
   const d = dc || DC;
   const onClick = onExpand ? (e) => {
@@ -3827,7 +3845,8 @@ const DashChartCard = React.memo(({title,children,dc,controls,onExpand}) => {
     onExpand(e.currentTarget.getBoundingClientRect());
   } : undefined;
   return (
-  <div onClick={onClick} title={onExpand ? "Click to explore" : undefined} style={{background:d.CARD,border:"1px solid "+d.BORDER,borderRadius:10,padding:"14px 10px 6px 10px",flex:1,minWidth:0,minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column",cursor:onExpand?"zoom-in":undefined}}>
+  <div onClick={onClick} className={onExpand ? "dash-explore" : undefined} style={{background:d.CARD,border:"1px solid "+d.BORDER,borderRadius:10,padding:"14px 10px 6px 10px",flex:1,minWidth:0,minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+    {onExpand && <div className="dash-explore-hint">Click to explore</div>}
     <div style={{padding:"0 6px",marginBottom:6,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
       <span style={{color:d.TEXT,fontWeight:700,fontSize:14,letterSpacing:"0.02em"}}>{title}</span>
       {controls && <div style={{display:"flex",alignItems:"center",gap:3}}>{controls}</div>}
