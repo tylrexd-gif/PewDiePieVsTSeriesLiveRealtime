@@ -3980,6 +3980,32 @@ const _expPyramid = (kind, lbSec, strip) => {
   return series;
 };
 
+// Monotone cubic through points (xs strictly increasing), matching recharts'
+// type="monotone" (d3 curveMonotoneX): smooth, and never overshoots the data.
+const _expDrawMonotone = (ctx, xs, ys, n) => {
+  if (n <= 0) return;
+  ctx.moveTo(xs[0], ys[0]);
+  if (n === 1) { ctx.lineTo(xs[0] + 0.5, ys[0]); return; }
+  if (n === 2) { ctx.lineTo(xs[1], ys[1]); return; }
+  const m = new Float64Array(n);
+  let h0 = xs[1] - xs[0], s0 = (ys[1] - ys[0]) / h0;
+  m[0] = s0;
+  for (let i = 1; i < n - 1; i++) {
+    const h1 = xs[i + 1] - xs[i], s1 = (ys[i + 1] - ys[i]) / h1;
+    const p = (s0 * h1 + s1 * h0) / (h0 + h1);
+    m[i] = (Math.sign(s0) + Math.sign(s1)) * Math.min(Math.abs(s0), Math.abs(s1), 0.5 * Math.abs(p)) || 0;
+    h0 = h1; s0 = s1;
+  }
+  m[n - 1] = s0;
+  // Endpoint tangents as in d3: one-sided estimate from the neighbouring slope.
+  m[0] = (3 * (ys[1] - ys[0]) / (xs[1] - xs[0]) - m[1]) / 2;
+  m[n - 1] = (3 * (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2]) - m[n - 2]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    const h = (xs[i + 1] - xs[i]) / 3;
+    ctx.bezierCurveTo(xs[i] + h, ys[i] + m[i] * h, xs[i + 1] - h, ys[i + 1] - m[i + 1] * h, xs[i + 1], ys[i + 1]);
+  }
+};
+
 const EXP_MIN_SPAN = 30 * 1000;
 const EXP_MAX_SPAN = REAL_DATA_END_MS - REAL_DATA_START_MS;
 const EXP_PAD = { l: 84, r: 20, t: 14, b: 30 };
@@ -4144,8 +4170,10 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
         }
         if (a <= z) {
           cmn[c] = a; cmx[c] = z;
-          if (a < lo) lo = a;
-          if (z > hi) hi = z;
+          // y-range fits the drawn (mid-value) line, not the full per-pixel spread
+          const mid = (a + z) / 2;
+          if (mid < lo) lo = mid;
+          if (mid > hi) hi = mid;
         }
       }
       return { cmn, cmx };
@@ -4219,30 +4247,32 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
     if (geo && !geo.loading) {
       ctx.globalCompositeOperation = "screen";
       ctx.lineJoin = "round";
-      ctx.lineWidth = 1.3;
+      // Same stroke widths as the dashboard charts (gain 1.8, totals/gap 2).
+      ctx.lineWidth = spec.kind === "gain" ? 1.8 : 2;
+      // Smooth monotone line like the dashboard charts: through every second when zoomed
+      // in, and through each pixel column's mid value when zoomed out. Gaps split the line.
       lines.forEach((ln, si) => {
         ctx.strokeStyle = ln.color;
         ctx.beginPath();
-        let pen = false;
+        const cap = geo.raw ? geo.pts[si].length : geo.cols;
+        const xs = new Float64Array(cap), ys = new Float64Array(cap);
+        let n = 0;
+        const flush = () => { _expDrawMonotone(ctx, xs, ys, n); n = 0; };
         if (geo.raw) {
           const a = geo.pts[si];
           for (let k = 0; k < a.length; k++) {
             const v = a[k];
-            if (v !== v) { pen = false; continue; }
-            const x = X(REAL_DATA_START_MS + (geo.i0 + k) * 1000), y = Y(v);
-            if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
+            if (v !== v) { flush(); continue; }
+            xs[n] = X(REAL_DATA_START_MS + (geo.i0 + k) * 1000); ys[n] = Y(v); n++;
           }
         } else {
           const { cmn, cmx } = geo.out[si];
-          let last = 0;
           for (let c = 0; c < geo.cols; c++) {
-            if (cmn[c] !== cmn[c]) { pen = false; continue; }
-            const x = EXP_PAD.l + c + 0.5, yTop = Y(cmx[c]), yBot = Y(cmn[c]);
-            if (!pen) { ctx.moveTo(x, yTop); ctx.lineTo(x, yBot); last = yBot; pen = true; continue; }
-            if (Math.abs(last - yTop) <= Math.abs(last - yBot)) { ctx.lineTo(x, yTop); ctx.lineTo(x, yBot); last = yBot; }
-            else { ctx.lineTo(x, yBot); ctx.lineTo(x, yTop); last = yTop; }
+            if (cmn[c] !== cmn[c]) { flush(); continue; }
+            xs[n] = EXP_PAD.l + c + 0.5; ys[n] = Y((cmn[c] + cmx[c]) / 2); n++;
           }
         }
+        flush();
         ctx.stroke();
       });
       ctx.globalCompositeOperation = "source-over";
