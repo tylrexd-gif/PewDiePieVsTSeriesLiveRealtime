@@ -68,10 +68,7 @@
         bar.style.marginLeft = '';
         bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
       };
-      window._setStage = function(msg) {
-        var el = document.getElementById('loading-stage');
-        if (el) el.textContent = msg;
-      };
+      window._setStage = function() {};
       window._dismissLoading = function() {
         clearInterval(_timer);
         var el = document.getElementById('loading');
@@ -80,6 +77,7 @@
       setInterval(function() { fetch('/ping').catch(function(){}); }, 5000);
       window.addEventListener('unload', function() { navigator.sendBeacon('/ping'); });
       window.onerror = function(msg, src, line, col, err) {
+        if (String(msg).indexOf('ResizeObserver loop') !== -1) return true; // benign browser notice
         clearInterval(_timer);
         document.body.innerHTML = '<pre style="color:red;padding:20px;white-space:pre-wrap">' + msg + '\n\n' + (err && err.stack || '') + '</pre>';
       };
@@ -133,9 +131,7 @@
   </head>
   <body>
     <div id="loading">
-      <div id="loading-stage">Starting…</div>
-      <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
-      <div id="loading-time">0.0s elapsed</div>
+      <div id="loading-stage">Loading data…</div>
     </div>
     <div id="root"></div>
   </body>

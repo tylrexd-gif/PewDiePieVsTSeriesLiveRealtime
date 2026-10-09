@@ -2,6 +2,7 @@
 import { FLARE_NEWS_ENTRIES, FLARE_PROMOTIONS, PROMO_DISPLAY_START_MS } from './flareNewsData.js';
 import { VOTE_LOG } from './flareVoteData.js';
 import ReactDOM from 'react-dom/client';
+import { createPortal, flushSync } from 'react-dom';
 
 /*
  * Layout ownership map:
@@ -127,7 +128,35 @@ import sbLogoV2 from './assets/SBLOGO_V2.png';
 import twitterIcon from './assets/twitterIcon.png';
 import pollCheckmarkIcon from './assets/pollCheckmarkIcon.png';
 import discordIcon from './assets/discordIcon.png';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceDot, Label, Customized } from "recharts";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ReferenceDot, Label, Customized } from "recharts";
+
+// Drop-in for recharts' ResponsiveContainer. Recharts applies a new size asynchronously,
+// so after a zoom/resize every chart is drawn one frame at its old size. Here the size
+// is committed with flushSync inside the ResizeObserver callback (after layout, before paint).
+const ResponsiveContainer = ({ width = "100%", height = "100%", children }) => {
+  const ref = useRef(null);
+  const [size, setSize] = useState(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[entries.length - 1].contentRect;
+      const w = Math.floor(r.width), h = Math.floor(r.height);
+      flushSync(() => setSize(s => (s && s.w === w && s.h === h) ? s : { w, h }));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // The chart sits in an absolutely positioned layer so its fixed pixel size never feeds back
+  // into the parent's min-content width (which would stop grid/flex cells from shrinking).
+  return (
+    <div ref={ref} style={{ width, height, position: "relative", minWidth: 0, minHeight: 0 }}>
+      <div style={{ position: "absolute", left: 0, top: 0 }}>
+        {size && size.w > 0 && size.h > 0 && React.cloneElement(React.Children.only(children), { width: size.w, height: size.h })}
+      </div>
+    </div>
+  );
+};
 
 // - HOURLY DATA: H -
 // Each row is [t, pt, tt] - three fields, no derivatives stored.
@@ -344,16 +373,27 @@ const _generateAuditPositions = (rawArr, seed) => {
 // The array must stay sorted ascending by startAt. Most switchovers land
 // at 00:00 UTC of the date on the filename, but some are hour-precision:
 //
-//   • Mar 31 banner stays live until Apr 1 08:00 UTC (not midnight).
+//   • Mar 31 banner stays live until Apr 1 13:00 UTC / 9am EDT (not midnight).
 //
 // Adding a new banner: import the constant in the base64 block above,
 // then insert a new entry here in chronological position.
-const PDP_BANNERS = [
+// Schedule entries are written as the UTC date; any entry at 00:00 UTC is moved to
+// 12:00 AM US Eastern on that date (04:00 UTC in EDT, 05:00 UTC in EST).
+// Entries with an explicit hour are left as written.
+const _bannerEtMidnight = (t) => {
+  if (new Date(t).getUTCHours() !== 0) return t;
+  const probe = t + 5 * 3600000;
+  const edt = (probe >= Date.UTC(2019, 2, 10, 7) && probe < Date.UTC(2019, 10, 3, 6)) || probe < Date.UTC(2018, 10, 4, 6);
+  return t + (edt ? 4 : 5) * 3600000;
+};
+const _toEt = (list) => list.map(b => ({ ...b, startAt: _bannerEtMidnight(b.startAt) }));
+
+const PDP_BANNERS = _toEt([
   { startAt: Date.UTC(2019, 2, 31, 0, 0), data: pdpBanner },           // start -> Jun 1
   { startAt: Date.UTC(2019, 5,  1, 0, 0), data: pdpBannerMilestone },  // Jun 1+
-];
+]);
 
-const TS_BANNERS = [
+const TS_BANNERS = _toEt([
   { startAt: Date.UTC(2018,  9, 17, 0, 0), data: tsBanner_1710 },  // Oct 17 2018
   { startAt: Date.UTC(2018,  9, 21, 0, 0), data: tsBanner_2110 },  // Oct 21 2018
   { startAt: Date.UTC(2018,  9, 27, 0, 0), data: tsBanner_2710 },  // Oct 27 2018
@@ -412,8 +452,8 @@ const TS_BANNERS = [
   { startAt: Date.UTC(2019,  2, 21, 0, 0), data: tsBanner_2103 },  // Mar 21 2019
   { startAt: Date.UTC(2019,  2, 26, 0, 0), data: tsBanner_2603 },  // Mar 26 2019
   { startAt: Date.UTC(2019,  2, 30, 0, 0), data: tsBanner_3003 },  // Mar 30 2019
-  { startAt: Date.UTC(2019,  2, 31, 0, 0), data: tsBanner_3103 },  // Mar 31 -> Apr 1 08:00
-  { startAt: Date.UTC(2019, 3,  1, 8, 0), data: tsBanner_0104 },  // Apr 1  08:00 ->
+  { startAt: Date.UTC(2019,  2, 31, 0, 0), data: tsBanner_3103 },  // Mar 31 -> Apr 1 13:00 UTC (9am EDT)
+  { startAt: Date.UTC(2019, 3,  1, 13, 0), data: tsBanner_0104 },  // Apr 1  13:00 UTC ->
   { startAt: Date.UTC(2019, 3,  3, 0, 0), data: tsBanner_0304 },  // Apr 3
   { startAt: Date.UTC(2019, 3,  6, 0, 0), data: tsBanner_0604 },  // Apr 6
   { startAt: Date.UTC(2019, 3,  7, 0, 0), data: tsBanner_0704 },  // Apr 7
@@ -442,17 +482,17 @@ const TS_BANNERS = [
   { startAt: Date.UTC(2019, 5,  3, 0, 0), data: tsBanner_0306 },  // Jun 3
   { startAt: Date.UTC(2019, 5,  6, 0, 0), data: tsBanner_0606 },  // Jun 6
   { startAt: Date.UTC(2019, 5,  9, 0, 0), data: tsBanner_0906 },  // Jun 9
-];
+]);
 
 const TS_BANNERS_RARE = TS_BANNERS.filter(b => new Set([
-  Date.UTC(2019, 2, 31, 0, 0), Date.UTC(2019, 3,  1, 8, 0),
+  Date.UTC(2019, 2, 31, 0, 0), Date.UTC(2019, 3,  1, 13, 0),
   Date.UTC(2019, 3,  7, 0, 0), Date.UTC(2019, 3, 15, 0, 0),
   Date.UTC(2019, 3, 19, 0, 0), Date.UTC(2019, 3, 24, 0, 0),
   Date.UTC(2019, 3, 29, 0, 0), Date.UTC(2019, 4,  3, 0, 0),
   Date.UTC(2019, 4, 10, 0, 0), Date.UTC(2019, 4, 15, 0, 0),
   Date.UTC(2019, 4, 20, 0, 0), Date.UTC(2019, 4, 25, 0, 0),
   Date.UTC(2019, 5,  1, 0, 0), Date.UTC(2019, 5,  6, 0, 0),
-]).has(b.startAt));
+].map(_bannerEtMidnight)).has(b.startAt));
 
 // Resolve the T-Series banner active at a given clockTime. Linear scan
 // over a short sorted array - at 16 entries this is microseconds per
@@ -2560,11 +2600,15 @@ const getFlareNewsMessage = (clockTime) => {
 };
 
 // LAYOUT: Flare - see LAYOUTS.md
-const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1, playing = true, newsFeed = true }) => {
+const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1, playing = true, newsFeed = true, nudge = null }) => {
   // Natural (unscaled) width of a single message copy. Measured once
   // after mount and again whenever the message string changes.
   const [textW, setTextW] = useState(0);
   const innerRef = useRef(null);
+  const stripRef = useRef(null);
+  const offRef = useRef(0);     // visual px scrolled, wrapped to one stretched copy
+  const multRef = useRef(1);
+  multRef.current = mult > 0 ? mult : 1;
 
   const message = newsFeed ? getFlareNewsMessage(clockTime) : getFlareTickerMessage();
 
@@ -2574,43 +2618,45 @@ const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1
     if (w > 0 && w !== textW) setTextW(w);
   }, [message, textW]);
 
-  // Inject the keyframes rule once per document. The translate
-  // percentage resolves against the element's un-transformed layout
-  // width (2.nTW with two back-to-back copies), while the scaleX
-  // happens in the same transform. Visual shift per iteration =
-  // |translatePercent| . 2.nTW. For the loop to tile exactly one
-  // stretched copy, that shift must equal STRETCH_X.nTW, so the
-  // percentage is STRETCH_X / 2. At STRETCH_X = 1.12 that's 56%. At
-  // the loop snap, copy #2 (identical to copy #1) sits in the viewport
-  // position copy #1 occupied at t = 0 - seamless.
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const id = "flare-ticker-keyframes";
-    const css =
-      "@keyframes flareTickerScroll { 0% { transform: translateX(0) scaleX(1.12); } 100% { transform: translateX(-56%) scaleX(1.12); } }";
-    const existing = document.getElementById(id);
-    if (existing) {
-      if (existing.textContent !== css) existing.textContent = css;
-      return;
-    }
-    const s = document.createElement("style");
-    s.id = id;
-    s.textContent = css;
-    document.head.appendChild(s);
-  }, []);
-
   // 12% horizontal glyph stretch - height unchanged.
   const STRETCH_X = 1.12;
-  // Scroll speed in visual px/s (halved from the prior 105 px/s baseline).
+  // Scroll speed in visual px/s at 1x; scaled by the playback multiplier.
   const SPEED_PX_S = 52;
+  // Copy #2 starts one stretched copy to the right, so wrapping the offset at
+  // loopW lands it exactly where copy #1 was - seamless.
+  const loopW = textW * STRETCH_X;
 
-  // One animation cycle traverses exactly one stretched message in
-  // visual space, i.e. nTW . STRETCH_X pixels. Divide by speed -> s.
-  // Effective duration shrinks with the playback multiplier so the
-  // ticker speeds up/slows down in lock-step with the 0.25x/0.5x/1x/2x/... button.
-  const baseDuration = textW > 0 ? (textW * STRETCH_X) / SPEED_PX_S : 150;
-  const effectiveMult = mult > 0 ? mult : 1;
-  const duration = baseDuration / effectiveMult;
+  // Position is integrated per frame (offset += speed * dt) rather than a CSS
+  // animation, so changing the speed only changes the rate - no jump.
+  const apply = () => {
+    const el = stripRef.current;
+    if (!el || loopW <= 0) return;
+    offRef.current = ((offRef.current % loopW) + loopW) % loopW;
+    el.style.transform = `translateX(${-offRef.current}px) scaleX(${STRETCH_X})`;
+  };
+  useLayoutEffect(apply);
+  useEffect(() => {
+    if (!playing || loopW <= 0) return;
+    let raf, last = performance.now();
+    const tick = (now) => {
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      offRef.current += SPEED_PX_S * multRef.current * dt;
+      apply();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, loopW]);
+
+  // Arrow-key seeks jump 5 s of playback; move the text the distance it would scroll in that time.
+  const nudgeSeen = useRef(nudge ? nudge.n : 0);
+  useEffect(() => {
+    if (!nudge || nudge.n === nudgeSeen.current) return;
+    nudgeSeen.current = nudge.n;
+    offRef.current += nudge.dir * 5 * SPEED_PX_S * multRef.current;
+    apply();
+  }, [nudge]);
 
   return (
     <div style={{
@@ -2628,30 +2674,13 @@ const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1
       visibility: textW > 0 ? "visible" : "hidden",
     }}>
       <div
+        ref={stripRef}
         style={{
           display: "inline-block",
           whiteSpace: "nowrap",
           willChange: "transform",
           transformOrigin: "left center",
-          // Animation is declared with LONGHAND properties rather than the
-          // `animation` shorthand. Reason: writing the shorthand to
-          // element.style resets every animation-* longhand - including
-          // animation-play-state - back to its default (`running`). React's
-          // style reconciler then sees animationPlayState unchanged between
-          // renders and skips the DOM write, so the DOM silently falls back
-          // to `running` and the ticker resumes scrolling while paused.
-          // This surfaces on seeks that cross a day boundary: dayKey flips,
-          // the message recomputes, useLayoutEffect remeasures textW,
-          // `duration` updates, and the shorthand gets rewritten. Longhands
-          // diff independently, so duration changes leave play state intact.
-          animationName: "flareTickerScroll",
-          animationDuration: `${duration}s`,
-          animationTimingFunction: "linear",
-          animationIterationCount: "infinite",
-          // CSS pauses the animation at its current frame and resumes from
-          // the same position, so stopping playback freezes the ticker
-          // mid-scroll rather than snapping back to start.
-          animationPlayState: playing ? "running" : "paused",
+          // transform is written imperatively by apply(); keep it out of this style object.
           fontFamily: "'Roboto Black'," + robotoFont,
           fontWeight: 900,      // Roboto Black
           fontSize: "13pt",
@@ -2696,7 +2725,7 @@ const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1
 // LAYOUT: Flare entry point - see LAYOUTS.md
 const FlareView = React.memo(({
   displayPt, displayTt, currentGap,
-  pdpLeading, clockTime, seekToken,
+  pdpLeading, clockTime, seekToken, tickerNudge,
   displayFTV,
   isRTMode = false,
   rtPeriodSec = 2,
@@ -3217,6 +3246,7 @@ const FlareView = React.memo(({
         mult={mult}
         playing={playing}
         newsFeed={newsFeed}
+        nudge={tickerNudge}
       />
 
       {/* Sub-gap box - 427x118 at (427,597), 4px rounded. Horizontally
@@ -3749,10 +3779,22 @@ const miniTogBtn = (active) => ({
   fontFamily: "inherit",
   lineHeight: "1.5",
 });
-const DashChartCard = React.memo(({title,children,dc,controls}) => {
+// Thin midnight markers to <= max, stepping by whole days anchored to absolute day number
+// so the kept lines don't shift as the window slides.
+const thinMidnights = (mids, max = 8) => {
+  if (mids.length <= max) return mids;
+  const s = [2, 3, 7, 14, 28, 56, 112].find(s => mids.length / s <= max) || Math.ceil(mids.length / max);
+  return mids.filter(m => Math.floor(m / DAY_MS) % s === 0);
+};
+
+const DashChartCard = React.memo(({title,children,dc,controls,onExpand}) => {
   const d = dc || DC;
+  const onClick = onExpand ? (e) => {
+    if (e.target.closest("button")) return;
+    onExpand(e.currentTarget.getBoundingClientRect());
+  } : undefined;
   return (
-  <div style={{background:d.CARD,border:"1px solid "+d.BORDER,borderRadius:10,padding:"14px 10px 6px 10px",flex:1,minWidth:0,minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+  <div onClick={onClick} title={onExpand ? "Click to explore" : undefined} style={{background:d.CARD,border:"1px solid "+d.BORDER,borderRadius:10,padding:"14px 10px 6px 10px",flex:1,minWidth:0,minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column",cursor:onExpand?"zoom-in":undefined}}>
     <div style={{padding:"0 6px",marginBottom:6,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
       <span style={{color:d.TEXT,fontWeight:700,fontSize:14,letterSpacing:"0.02em"}}>{title}</span>
       {controls && <div style={{display:"flex",alignItems:"center",gap:3}}>{controls}</div>}
@@ -3762,8 +3804,489 @@ const DashChartCard = React.memo(({title,children,dc,controls}) => {
   );
 });
 
+// - Chart Explorer overlay -
+const EXPAND_MS = 320;
+const EXPAND_EASE = "cubic-bezier(0.2, 0.9, 0.25, 1)";
+// Covers everything below `top` (the playback bar stays sharp and usable). The panel starts
+// transformed onto the clicked card's rect and animates out to fill the area.
+const DashExpandOverlay = ({ rect, top, closing, onClose, onClosed, children }) => {
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    let r2;
+    const r1 = requestAnimationFrame(() => { r2 = requestAnimationFrame(() => setEntered(true)); });
+    return () => { cancelAnimationFrame(r1); cancelAnimationFrame(r2); };
+  }, []);
+  useEffect(() => {
+    if (!closing) return;
+    const id = setTimeout(onClosed, EXPAND_MS);
+    return () => clearTimeout(id);
+  }, [closing, onClosed]);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+  const open = entered && !closing;
+  const vw = window.innerWidth, vh = window.innerHeight - top;
+  const M = Math.round(Math.min(vw, vh) * 0.025);
+  const tw = vw - 2 * M, th = vh - 2 * M;
+  const collapsed = `translate(${rect.left - M}px, ${rect.top - top - M}px) scale(${rect.width / tw}, ${rect.height / th})`;
+  return (
+    <div
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", top, left: 0, right: 0, bottom: 0, zIndex: 100000,
+        background: open ? "rgba(6,8,14,0.45)" : "rgba(6,8,14,0)",
+        backdropFilter: open ? "blur(10px)" : "blur(0px)",
+        WebkitBackdropFilter: open ? "blur(10px)" : "blur(0px)",
+        transition: `background ${EXPAND_MS}ms ${EXPAND_EASE}, backdrop-filter ${EXPAND_MS}ms ${EXPAND_EASE}`,
+      }}>
+      <div style={{
+        position: "absolute", left: M, top: M, width: tw, height: th,
+        transformOrigin: "0 0",
+        transform: open ? "none" : collapsed,
+        opacity: open ? 1 : 0,
+        transition: `transform ${EXPAND_MS}ms ${EXPAND_EASE}, opacity ${Math.round(EXPAND_MS * 0.7)}ms ease`,
+        display: "flex", borderRadius: 12, boxShadow: "0 24px 70px rgba(0,0,0,0.6)",
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+};
+
+// Per-second readers by binary index. kind: 'subs' (pdp, ts) | 'gap' | 'gain' (pdp, ts over lbSec).
+const expValueFns = (kind, lbSec, strip) => {
+  if (kind === "subs") return [(i) => _realDataBuf[i * 2], (i) => _realDataBuf[i * 2 + 1]];
+  if (kind === "gap") return [(i) => _realDataBuf[i * 2] - _realDataBuf[i * 2 + 1]];
+  const mk = (off, ch) => (i) => {
+    const j = i - lbSec;
+    if (j < 0) return null;
+    let v = _realDataBuf[i * 2 + off] - _realDataBuf[j * 2 + off];
+    if (strip) { const t = REAL_DATA_START_MS + i * 1000; v -= getRdCumAudit(t, ch) - getRdCumAudit(t - lbSec * 1000, ch); }
+    return v;
+  };
+  return [mk(0, "pdp"), mk(1, "ts")];
+};
+
+// Min/max pyramid over the whole dataset: level L stores one [min,max] per EXP_BASE*2^L seconds.
+// Empty buckets have mn > mx.
+const EXP_BASE = 16;
+const _expPyrCache = new Map();
+let _expPyrBuf = null;
+const _expBuildBase = (kind, lbSec, strip, s) => {
+  const b = _realDataBuf, N = REAL_DATA_PAIR_COUNT;
+  const nb = Math.ceil(N / EXP_BASE);
+  const mn = new Int32Array(nb).fill(2147483647), mx = new Int32Array(nb).fill(-2147483648);
+  const audits = (kind === "gain" && strip) ? (s === 0 ? _rdAuditPdp : _rdAuditTs) : null;
+  const pfx = s === 0 ? _rdAuditPdpPfx : _rdAuditTsPfx;
+  const lbMs = lbSec * 1000;
+  let pNow = -1, pPast = -1;
+  for (let i = 0; i < N; i++) {
+    let v;
+    if (kind === "subs") v = b[i * 2 + s];
+    else if (kind === "gap") v = b[i * 2] - b[i * 2 + 1];
+    else {
+      const j = i - lbSec;
+      if (j < 0) continue;
+      v = b[i * 2 + s] - b[j * 2 + s];
+      if (audits) {
+        const t = REAL_DATA_START_MS + i * 1000;
+        while (pNow + 1 < audits.length && audits[pNow + 1].ms <= t) pNow++;
+        while (pPast + 1 < audits.length && audits[pPast + 1].ms <= t - lbMs) pPast++;
+        v -= (pNow >= 0 ? pfx[pNow] : 0) - (pPast >= 0 ? pfx[pPast] : 0);
+      }
+    }
+    const k = (i / EXP_BASE) | 0;
+    if (v < mn[k]) mn[k] = v;
+    if (v > mx[k]) mx[k] = v;
+  }
+  return { mn, mx };
+};
+const _expPyramid = (kind, lbSec, strip) => {
+  if (_expPyrBuf !== _realDataBuf) { _expPyrCache.clear(); _expPyrBuf = _realDataBuf; }
+  const key = kind + "|" + lbSec + "|" + (strip ? 1 : 0);
+  const hit = _expPyrCache.get(key);
+  if (hit) return hit;
+  const series = [];
+  for (let s = 0; s < (kind === "gap" ? 1 : 2); s++) {
+    const levels = [_expBuildBase(kind, lbSec, strip, s)];
+    while (levels[levels.length - 1].mn.length > 1) {
+      const p = levels[levels.length - 1], m = Math.ceil(p.mn.length / 2);
+      const mn = new Int32Array(m), mx = new Int32Array(m);
+      for (let k = 0; k < m; k++) {
+        const a = 2 * k, c = a + 1 < p.mn.length ? a + 1 : a;
+        mn[k] = p.mn[a] < p.mn[c] ? p.mn[a] : p.mn[c];
+        mx[k] = p.mx[a] > p.mx[c] ? p.mx[a] : p.mx[c];
+      }
+      levels.push({ mn, mx });
+    }
+    series.push(levels);
+  }
+  if (_expPyrCache.size >= 4) _expPyrCache.delete(_expPyrCache.keys().next().value);
+  _expPyrCache.set(key, series);
+  return series;
+};
+
+const EXP_MIN_SPAN = 30 * 1000;
+const EXP_MAX_SPAN = REAL_DATA_END_MS - REAL_DATA_START_MS;
+const EXP_PAD = { l: 84, r: 20, t: 14, b: 30 };
+const EXP_X_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 1209600, 2592000];
+const EXP_PRESETS = [["10m", 600], ["1h", 3600], ["6h", 21600], ["1d", 86400], ["7d", 604800], ["30d", 2592000]];
+const _MON3 = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const _p2 = (n) => String(n).padStart(2, "0");
+const _expShift = (a, span) => {
+  span = Math.min(Math.max(span, EXP_MIN_SPAN), EXP_MAX_SPAN);
+  a = Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS - span, a));
+  return [a, a + span];
+};
+const _expLocal = (t) => new Date(t + _getEasternOffset(t) * 3600000);
+const _expFmtTick = (t, stepSec) => {
+  const d = _expLocal(t);
+  const midnight = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0;
+  if (stepSec >= 86400 || midnight) return _MON3[d.getUTCMonth()] + " " + d.getUTCDate();
+  const hm = _p2(d.getUTCHours()) + ":" + _p2(d.getUTCMinutes());
+  return stepSec < 60 ? hm + ":" + _p2(d.getUTCSeconds()) : hm;
+};
+// "Apr 23, 2019 14:05 – 15:05 ET" (same day) or "Apr 16, 2019 14:05 – Apr 23, 2019 14:05 ET"; seconds under 1h.
+const _expFmtRange = (t0, t1) => {
+  const secs = t1 - t0 < 3600000;
+  const day = (d) => _MON3[d.getUTCMonth()] + " " + d.getUTCDate() + ", " + d.getUTCFullYear();
+  const time = (d) => _p2(d.getUTCHours()) + ":" + _p2(d.getUTCMinutes()) + (secs ? ":" + _p2(d.getUTCSeconds()) : "");
+  const a = _expLocal(t0), b = _expLocal(t1);
+  const sameDay = day(a) === day(b);
+  return day(a) + " " + time(a) + " – " + (sameDay ? "" : day(b) + " ") + time(b) + " ET";
+};
+const _expFmtY = (v, kind, step) => {
+  if (kind === "subs" && step >= 10000) return (v / 1e6).toFixed(step >= 1e6 ? 0 : step >= 1e5 ? 1 : 2) + "M";
+  return Math.round(v).toLocaleString();
+};
+const _expNiceStep = (range, target) => {
+  const raw = range / Math.max(1, target);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  return Math.max(1, (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag);
+};
+const _expFmtSpan = (sec) => sec < 120 ? Math.round(sec) + "s" : sec < 7200 ? Math.round(sec / 60) + "m" : sec < 172800 ? (sec / 3600).toFixed(sec < 36000 ? 1 : 0) + "h" : (sec / 86400).toFixed(1) + "d";
+
+// Interactive whole-dataset chart: wheel zooms around the cursor, drag pans, double-click resets.
+const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
+  const d = dc || DC;
+  const wrapRef = useRef(null), canvasRef = useRef(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const [view, setView] = useState(() => _expShift(spec.t0, spec.t1 - spec.t0));
+  const [pyr, setPyr] = useState(null);
+  const [hover, setHover] = useState(null);
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef(null);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const lbSec = spec.lbSec || 0;
+  // Series indices shown: gap has one; subs/gain honour the dashboard PDP/TS filter.
+  const visIdx = spec.kind === "gap" ? [0] : chan === "pdp" ? [0] : chan === "ts" ? [1] : [0, 1];
+  const allLines = spec.kind === "gap"
+    ? [{ name: "Gap", color: "#e2e5eb" }]
+    : [{ name: spec.kind === "subs" ? "PewDiePie" : "PDP", color: d.PDP }, { name: spec.kind === "subs" ? "T-Series" : "T-S", color: d.TS }];
+  const lines = visIdx.map(i => allLines[i]);
+  const visKey = visIdx.join(",");
+  const fns = useMemo(() => {
+    if (!ready) return null;
+    const all = expValueFns(spec.kind, lbSec, spec.strip);
+    return visIdx.map(i => all[i]);
+  }, [ready, spec.kind, lbSec, spec.strip, visKey]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const id = setTimeout(() => setPyr(_expPyramid(spec.kind, lbSec, spec.strip)), EXPAND_MS + 40);
+    return () => clearTimeout(id);
+  }, [ready, spec.kind, lbSec, spec.strip]);
+
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const measure = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, []);
+
+  const pw = Math.max(1, size.w - EXP_PAD.l - EXP_PAD.r);
+  const ph = Math.max(1, size.h - EXP_PAD.t - EXP_PAD.b);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      const [t0, t1] = viewRef.current;
+      const fx = Math.min(1, Math.max(0, (e.clientX - r.left - EXP_PAD.l) / pw));
+      const ta = t0 + fx * (t1 - t0);
+      const span = Math.min(Math.max((t1 - t0) * Math.exp(e.deltaY * 0.0015), EXP_MIN_SPAN), EXP_MAX_SPAN);
+      setView(_expShift(ta - fx * span, span));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [pw]);
+
+  useEffect(() => {
+    const mv = (e) => {
+      const dr = dragRef.current;
+      if (!dr) return;
+      const span = dr.v[1] - dr.v[0];
+      setView(_expShift(dr.v[0] - (e.clientX - dr.x) / pw * span, span));
+    };
+    const up = () => { if (dragRef.current) { dragRef.current = null; setDragging(false); } };
+    window.addEventListener("mousemove", mv);
+    window.addEventListener("mouseup", up);
+    return () => { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); };
+  }, [pw]);
+
+  // Visible geometry: every second when <= EXP_BASE s/px, otherwise per-pixel min/max from the pyramid.
+  const geo = useMemo(() => {
+    if (!fns || size.w === 0) return null;
+    const [t0, t1] = view;
+    const secPerPx = (t1 - t0) / 1000 / pw;
+    let lo = Infinity, hi = -Infinity;
+    if (secPerPx <= EXP_BASE) {
+      const i0 = Math.max(0, Math.floor((t0 - REAL_DATA_START_MS) / 1000));
+      const i1 = Math.min(REAL_DATA_PAIR_COUNT - 1, Math.ceil((t1 - REAL_DATA_START_MS) / 1000));
+      const pts = fns.map((fn) => {
+        const a = new Float64Array(Math.max(0, i1 - i0 + 1));
+        for (let i = i0; i <= i1; i++) {
+          const v = fn(i);
+          if (v == null) { a[i - i0] = NaN; continue; }
+          a[i - i0] = v;
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+        return a;
+      });
+      return { raw: true, i0, pts, lo, hi, secPerPx };
+    }
+    if (!pyr) return { loading: true, secPerPx };
+    const L = Math.max(0, Math.min(pyr[0].length - 1, Math.floor(Math.log2(secPerPx / EXP_BASE))));
+    const B = EXP_BASE * Math.pow(2, L);
+    const cols = Math.ceil(pw);
+    const base = (t0 - REAL_DATA_START_MS) / 1000;
+    const out = visIdx.map(i => pyr[i]).map((levels) => {
+      const { mn, mx } = levels[L];
+      const cmn = new Float64Array(cols).fill(NaN), cmx = new Float64Array(cols).fill(NaN);
+      for (let c = 0; c < cols; c++) {
+        const ia = base + c * secPerPx;
+        const ka = Math.max(0, Math.floor(ia / B));
+        const kb = Math.min(mn.length - 1, Math.floor((ia + secPerPx - 1e-6) / B));
+        let a = Infinity, z = -Infinity;
+        for (let k = ka; k <= kb; k++) {
+          if (mn[k] > mx[k]) continue;
+          if (mn[k] < a) a = mn[k];
+          if (mx[k] > z) z = mx[k];
+        }
+        if (a <= z) {
+          cmn[c] = a; cmx[c] = z;
+          if (a < lo) lo = a;
+          if (z > hi) hi = z;
+        }
+      }
+      return { cmn, cmx };
+    });
+    return { raw: false, cols, out, lo, hi, secPerPx };
+  }, [view, pw, size.w, pyr, fns, visKey]);
+
+  let ylo = 0, yhi = 1;
+  if (geo && isFinite(geo.lo) && isFinite(geo.hi)) {
+    const pad = (geo.hi - geo.lo) * 0.05 || 1;
+    ylo = geo.lo - pad; yhi = geo.hi + pad;
+  }
+  const yStep = _expNiceStep(yhi - ylo, ph / 55);
+  const hoverVals = (hover && fns) ? (() => {
+    const i = Math.round((hover.t - REAL_DATA_START_MS) / 1000);
+    if (i < 0 || i >= REAL_DATA_PAIR_COUNT) return null;
+    return fns.map((fn) => fn(i));
+  })() : null;
+
+  useLayoutEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || size.w === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(size.w * dpr);
+    cv.height = Math.round(size.h * dpr);
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.w, size.h);
+    const [t0, t1] = view;
+    const span = t1 - t0;
+    const X = (t) => EXP_PAD.l + (t - t0) / span * pw;
+    const Y = (v) => EXP_PAD.t + (1 - (v - ylo) / (yhi - ylo)) * ph;
+    ctx.font = "11px Inter, system-ui, sans-serif";
+
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.setLineDash([3, 3]);
+    for (let v = Math.ceil(ylo / yStep) * yStep; v <= yhi; v += yStep) {
+      const y = Math.round(Y(v)) + 0.5;
+      ctx.strokeStyle = "#2e3348";
+      ctx.beginPath(); ctx.moveTo(EXP_PAD.l, y); ctx.lineTo(EXP_PAD.l + pw, y); ctx.stroke();
+      ctx.fillStyle = d.DIM;
+      ctx.fillText(_expFmtY(v, spec.kind, yStep), EXP_PAD.l - 8, y);
+    }
+    ctx.setLineDash([]);
+    if (spec.kind !== "subs" && ylo < 0 && yhi > 0) {
+      const y = Math.round(Y(0)) + 0.5;
+      ctx.strokeStyle = "#5a5f72";
+      ctx.beginPath(); ctx.moveTo(EXP_PAD.l, y); ctx.lineTo(EXP_PAD.l + pw, y); ctx.stroke();
+    }
+
+    const stepSec = EXP_X_STEPS.find((s) => s * 1000 / span * pw >= 95) || EXP_X_STEPS[EXP_X_STEPS.length - 1];
+    const S = stepSec * 1000;
+    const offMs = _getEasternOffset(t0) * 3600000;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (let t = Math.ceil((t0 + offMs) / S) * S - offMs; t <= t1; t += S) {
+      const x = Math.round(X(t)) + 0.5;
+      const lbl = _expFmtTick(t, stepSec);
+      const isDay = stepSec < 86400 && /^[A-Z]/.test(lbl);
+      ctx.strokeStyle = isDay ? "#3a3f55" : "#23273a";
+      ctx.beginPath(); ctx.moveTo(x, EXP_PAD.t); ctx.lineTo(x, EXP_PAD.t + ph); ctx.stroke();
+      ctx.fillStyle = isDay ? d.TEXT : d.DIM;
+      ctx.fillText(lbl, x, EXP_PAD.t + ph + 8);
+    }
+    ctx.strokeStyle = d.BORDER;
+    ctx.beginPath(); ctx.moveTo(EXP_PAD.l, EXP_PAD.t + ph + 0.5); ctx.lineTo(EXP_PAD.l + pw, EXP_PAD.t + ph + 0.5); ctx.stroke();
+
+    ctx.save();
+    ctx.beginPath(); ctx.rect(EXP_PAD.l, EXP_PAD.t, pw, ph); ctx.clip();
+    if (geo && !geo.loading) {
+      ctx.globalCompositeOperation = "screen";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 1.3;
+      lines.forEach((ln, si) => {
+        ctx.strokeStyle = ln.color;
+        ctx.beginPath();
+        let pen = false;
+        if (geo.raw) {
+          const a = geo.pts[si];
+          for (let k = 0; k < a.length; k++) {
+            const v = a[k];
+            if (v !== v) { pen = false; continue; }
+            const x = X(REAL_DATA_START_MS + (geo.i0 + k) * 1000), y = Y(v);
+            if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
+          }
+        } else {
+          const { cmn, cmx } = geo.out[si];
+          let last = 0;
+          for (let c = 0; c < geo.cols; c++) {
+            if (cmn[c] !== cmn[c]) { pen = false; continue; }
+            const x = EXP_PAD.l + c + 0.5, yTop = Y(cmx[c]), yBot = Y(cmn[c]);
+            if (!pen) { ctx.moveTo(x, yTop); ctx.lineTo(x, yBot); last = yBot; pen = true; continue; }
+            if (Math.abs(last - yTop) <= Math.abs(last - yBot)) { ctx.lineTo(x, yTop); ctx.lineTo(x, yBot); last = yBot; }
+            else { ctx.lineTo(x, yBot); ctx.lineTo(x, yTop); last = yTop; }
+          }
+        }
+        ctx.stroke();
+      });
+      ctx.globalCompositeOperation = "source-over";
+    }
+    if (curTime >= t0 && curTime <= t1) {
+      const x = Math.round(X(curTime)) + 0.5;
+      ctx.strokeStyle = "rgba(245,197,66,0.8)";
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.moveTo(x, EXP_PAD.t); ctx.lineTo(x, EXP_PAD.t + ph); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (hover && hoverVals) {
+      const x = X(hover.t);
+      ctx.strokeStyle = "rgba(226,229,235,0.35)";
+      ctx.beginPath(); ctx.moveTo(x, EXP_PAD.t); ctx.lineTo(x, EXP_PAD.t + ph); ctx.stroke();
+      hoverVals.forEach((v, si) => {
+        if (v == null) return;
+        ctx.fillStyle = lines[si].color;
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(x, Y(v), 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      });
+    }
+    ctx.restore();
+  });
+
+  const onMove = (e) => {
+    if (dragRef.current) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - r.left - EXP_PAD.l;
+    if (x < 0 || x > pw) { setHover(null); return; }
+    const [t0, t1] = view;
+    setHover({ t: Math.round((t0 + x / pw * (t1 - t0)) / 1000) * 1000, x: x + EXP_PAD.l });
+  };
+  const zoomTo = (sec) => {
+    const [t0, t1] = view;
+    const c = (curTime >= t0 && curTime <= t1) ? curTime : (t0 + t1) / 2;
+    setView(_expShift(c - sec * 500, sec * 1000));
+  };
+  const resetView = () => setView(_expShift(spec.t0, spec.t1 - spec.t0));
+  const btn = (active) => ({ ...miniTogBtn(active), fontSize: 11, padding: "2px 8px" });
+
+  let tip = null;
+  if (hover && hoverVals) {
+    const dt = _expLocal(hover.t);
+    const label = _MON3[dt.getUTCMonth()] + " " + dt.getUTCDate() + ", " + dt.getUTCFullYear() + "  " +
+      _p2(dt.getUTCHours()) + ":" + _p2(dt.getUTCMinutes()) + ":" + _p2(dt.getUTCSeconds()) + (_getEasternOffset(hover.t) === -4 ? " EDT" : " EST");
+    const flip = hover.x > size.w - 240;
+    tip = (
+      <div style={{ position: "absolute", top: EXP_PAD.t + 8, left: flip ? undefined : hover.x + 14, right: flip ? size.w - hover.x + 14 : undefined, background: "#1e2130", border: "1px solid " + d.BORDER, borderRadius: 6, padding: "8px 12px", fontSize: 12, pointerEvents: "none", whiteSpace: "nowrap" }}>
+        <div style={{ color: d.DIM, marginBottom: 4 }}>{label}</div>
+        {hoverVals.map((v, i) => (
+          <div key={i} style={{ color: lines[i].color, fontWeight: 600 }}>
+            {lines[i].name}: {v == null ? "—" : (spec.kind !== "subs" && v >= 0 ? "+" : "") + Math.round(v).toLocaleString()}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  const spanSec = (view[1] - view[0]) / 1000;
+  const resLabel = !geo ? "" : geo.secPerPx <= 1 ? "every second" : geo.secPerPx <= EXP_BASE ? "every second (" + _expFmtSpan(geo.secPerPx) + "/px)" : "min/max per px (" + _expFmtSpan(geo.secPerPx) + "/px)";
+
+  return (
+    <div style={{ background: d.CARD, border: "1px solid " + d.BORDER, borderRadius: 12, flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px 8px 16px", flexWrap: "wrap" }}>
+        <span style={{ color: d.TEXT, fontWeight: 700, fontSize: 17 }}>{spec.title}</span>
+        {lines.map((l) => (
+          <span key={l.name} style={{ color: d.DIM, fontSize: 12 }}>
+            <span style={{ display: "inline-block", width: 12, height: 3, background: l.color, borderRadius: 2, marginRight: 6, verticalAlign: "middle" }}/>{l.name}
+          </span>
+        ))}
+        <span style={{ color: d.TEXT, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>{_expFmtRange(view[0], view[1])}</span>
+        {dev && <span style={{ color: d.DIM, fontSize: 11 }}>{_expFmtSpan(spanSec) + " window · " + resLabel}</span>}
+        <div style={{ flex: 1 }}/>
+        {EXP_PRESETS.map(([lbl, sec]) => <button key={lbl} onClick={() => zoomTo(sec)} style={btn(Math.abs(spanSec - sec) < sec * 0.02)}>{lbl}</button>)}
+        <button onClick={() => setView([REAL_DATA_START_MS, REAL_DATA_END_MS])} style={btn(spanSec * 1000 >= EXP_MAX_SPAN - 1000)}>All</button>
+        <button onClick={resetView} style={btn(false)}>Reset</button>
+        <button onClick={onClose} style={{ ...btn(false), color: "#aaa", marginLeft: 6 }} title="Close (Esc)">{"✕"}</button>
+      </div>
+      <div
+        ref={wrapRef}
+        onMouseDown={(e) => { if (e.button !== 0) return; dragRef.current = { x: e.clientX, v: view }; setDragging(true); setHover(null); }}
+        onMouseMove={onMove}
+        onMouseLeave={() => setHover(null)}
+        onDoubleClick={resetView}
+        style={{ flex: 1, minHeight: 0, position: "relative", cursor: dragging ? "grabbing" : "crosshair", userSelect: "none" }}>
+        <canvas ref={canvasRef} style={{ position: "absolute", left: 0, top: 0, width: size.w, height: size.h }}/>
+        {tip}
+        {(!ready || (geo && geo.loading)) && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: d.DIM, fontSize: 13, pointerEvents: "none" }}>
+            {!ready ? "Waiting for data…" : "Building full-dataset index…"}
+          </div>
+        )}
+        <div style={{ position: "absolute", right: EXP_PAD.r + 4, bottom: EXP_PAD.b + 6, color: "#555b70", fontSize: 10, pointerEvents: "none" }}>
+          {"scroll to zoom · drag to pan · double-click to reset"}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // LAYOUT: Dashboard chart helper - see LAYOUTS.md
-const DashTooltip = ({active,payload,label,fmtMode,dc,flare,flareDark}) => {
+const DashTooltip =({active,payload,label,fmtMode,dc,flare,flareDark}) => {
   if (!active||!payload?.length) return null;
   const d = dc || DC;
   const useLightBg = flare && !flareDark;
@@ -4205,6 +4728,9 @@ export default function SocialBladeLive() {
   const [dashRawDelta, setDashRawDelta] = useState(false);
   const [dashGain5min, setDashGain5min] = useState(false);
   const [dashGainPerMin, setDashGainPerMin] = useState(false);
+  const [tickerNudge, setTickerNudge] = useState({ n: 0, dir: 0 });
+  const [explorer, setExplorer] = useState(null); // { kind, lbSec, title, t0, t1, strip, rect, closing }
+  const expWasPlayingRef = useRef(false);
   const [rawAltReady, setRawAltReady] = useState(false);
   const maxIdx = RAW.length - 1;
   const rdMaxIdx = REAL_DATA_HOURS; // 4704 hours - real data playhead ceiling
@@ -4253,12 +4779,26 @@ export default function SocialBladeLive() {
   const [pos, setPos] = useState(() => _ss.pos != null ? _ss.pos : tsToPos(Date.UTC(2018, 9, 18, 4, 0)));
   const [menuOpen, setMenuOpen] = useState(() => _ss.menuOpen != null ? _ss.menuOpen : true);
   const [barHidden, setBarHidden] = useState(() => _ss.barHidden ?? false);
+  // Live playback-bar height: it wraps / changes with zoom and per-view controls, so track it.
+  const [ctrlBarH, setCtrlBarH] = useState(0);
+  const ctrlBarRoRef = useRef(null);
+  const ctrlBarRef = useCallback((el) => {
+    ctrlBarRoRef.current?.disconnect();
+    ctrlBarRoRef.current = null;
+    if (!el) { setCtrlBarH(0); return; }
+    // flushSync so the layout below the bar is corrected before the next paint.
+    const ro = new ResizeObserver(() => flushSync(() => setCtrlBarH(el.offsetHeight)));
+    ro.observe(el);
+    ctrlBarRoRef.current = ro;
+    setCtrlBarH(el.offsetHeight);
+  }, []);
   // SocialBlade "realistic bounds": snap the 1hr-growth / 1hr-gap / 1day-gap chart
   // Y-domains to round nice-number ticks containing the range (like the hist gap
   // charts) instead of the tight min/max - so the axis only steps at round
   // thresholds rather than drifting every frame.
   const [view, setView] = useState(() => _ss.view ?? "socialblade");
   const [dashWin, setDashWin] = useState(() => _ss.dashWin ?? 7);
+  const [sbGapWin, setSbGapWin] = useState(() => _ss.sbGapWin ?? 7);
   const [dashChanFilter, setDashChanFilter] = useState('both'); // 'both'|'pdp'|'ts'
   const dashShowCharts = true;
   // Per-second mode (standard dashboard): swaps the 1min-gain chart for a 1s-gain
@@ -4348,15 +4888,15 @@ export default function SocialBladeLive() {
     }
   }, []);
 
-  useEffect(() => { window._dismissLoading?.(); }, []);
+  useEffect(() => { if (realDataReady) window._dismissLoading?.(); }, [realDataReady]);
 
   // Persist settings to localStorage
   useEffect(() => {
     _saveSS({ speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval });
   }, [speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval]);
   useEffect(() => {
-    _saveSS({ view, dashWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
-  }, [view, dashWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
+    _saveSS({ view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
+  }, [view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
   useEffect(() => {
     const id = setInterval(() => { _saveSS({ pos: posRef.current }); }, 3000);
     return () => clearInterval(id);
@@ -4419,7 +4959,10 @@ export default function SocialBladeLive() {
       ? 'every_second_counts_pvt_u32le.raw.bin'
       : 'every_second_counts_pvt_u32le.bin';
     setRealDataReady(false);
-    _reloadRealData(file, () => setRealDataReady(!!_realDataBuf));
+    _reloadRealData(file, () => {
+      setRealDataReady(!!_realDataBuf);
+      if (!_realDataBuf) window._dismissLoading?.(); // don't hang on the loading screen if the fetch failed
+    });
   }, [rawMode]);
 
   // Load raw alt buffer on demand for delta chart.
@@ -4576,10 +5119,10 @@ export default function SocialBladeLive() {
     return pts;
   }, [tMinGap1d, _gap1dKey, _gap1dQuantum, _gap1dStep, realDataReady]);
 
-  // In Real Data mode the hist chart shows a rolling 2-week window ending at
+  // In Real Data mode the hist chart shows a rolling sbGapWin-day window ending at
   // curTime. In Alt mode tStart is fixed at the user-chosen reset point.
   const _histTStart = appMode === 'real'
-    ? Math.max(REAL_DATA_START_MS, gapTime - 14 * DAY_MS)
+    ? Math.max(REAL_DATA_START_MS, gapTime - sbGapWin * DAY_MS)
     : RAW[histStartIdx].t;
   const _histSpan = Math.max(0, gapTime - _histTStart);
   const _histModeFloor = (speedMode === "1m") ? 60000 : (rtPeriodSec * 1000);
@@ -4795,6 +5338,7 @@ export default function SocialBladeLive() {
       delta *= mult;
       const next = Math.max(SEEK_START, Math.min(effectiveMaxIdx, posRef.current + delta));
       posRef.current = next; setPos(next); clearRT(); dispatch({type:"BUMP_SEEK"});
+      setTickerNudge(v => ({ n: v.n + 1, dir }));
       if (musicArrowSeekRef.current) musicSeekRef.current?.(dir);
     };
     window.addEventListener("keydown", handler);
@@ -5146,6 +5690,9 @@ export default function SocialBladeLive() {
     return `Sub Gap: T-Series: +${Math.abs(g).toLocaleString()}`;
   })();
 
+  // Re-measure when the label grows, when the SB view mounts the span, and after web fonts load.
+  const [fontsReady, setFontsReady] = useState(false);
+  useEffect(() => { document.fonts?.ready.then(() => setFontsReady(true)); }, []);
   useLayoutEffect(() => {
     const el = gapLabelRef.current;
     if (!el) return;
@@ -5153,7 +5700,7 @@ export default function SocialBladeLive() {
     const w = el.offsetWidth;
     const scale = w > maxW ? maxW / w : 1;
     setGapLabelScale(prev => Math.abs(prev - scale) < 0.001 ? prev : scale);
-  }, [gapLabel.length]);
+  }, [gapLabel.length, view, sbDark, fontsReady]);
 
   // Milestone predictions
   const nextMs = (v) => v!=null ? Math.ceil(v/1e6)*1e6 : null;
@@ -5232,7 +5779,7 @@ export default function SocialBladeLive() {
   const freqDataRef = useRef(null);
   useEffect(() => {
     const handleResize = () => {
-      const barH = barHidden ? 0 : (document.querySelector('[data-controlbar]')?.offsetHeight || 0);
+      const barH = barHidden ? 0 : ctrlBarH;
       const sw = window.innerWidth / 1280;
       const sh = (window.innerHeight - barH) / 720;
       setScale(Math.min(sw, sh));
@@ -5241,7 +5788,7 @@ export default function SocialBladeLive() {
     setTimeout(handleResize, 0);
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [menuOpen, barHidden]);
+  }, [menuOpen, barHidden, ctrlBarH]);
 
   // Chart tick formatters — all display in Eastern Time (same as Raleigh clock)
   const fmt1hTick = (ts) => {
@@ -5270,7 +5817,6 @@ export default function SocialBladeLive() {
   const [dashScoreScale, setDashScoreScale] = useState(1);
   const [dashTargetH, setDashTargetH] = useState(0);
   const leftPanelRef = useRef(null);
-  const [leftPanelScale, setLeftPanelScale] = useState(1);
   const eDC = DC;
   useEffect(() => {
     let frames = [];
@@ -5310,7 +5856,7 @@ export default function SocialBladeLive() {
       el.style.zoom = prevZoom;
       el.style.width = prevWidth;
       if (natW < 10 || natH < 10) return;
-      const barH = barHidden ? 0 : (document.querySelector('[data-controlbar]')?.offsetHeight || 0);
+      const barH = barHidden ? 0 : ctrlBarH;
       const availH = window.innerHeight - barH - 20;
       const availW = window.innerWidth - 64;
       const zByW = availW / natW;
@@ -5330,37 +5876,53 @@ export default function SocialBladeLive() {
     const onResize = () => requestAnimationFrame(measure);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [view, dashShowCharts, menuOpen, barHidden]);
+  }, [view, dashShowCharts, menuOpen, barHidden, ctrlBarH]);
 
-  useEffect(() => {
-    if (view !== "dashboard" || !dashShowCharts) { setLeftPanelScale(1); return; }
+  // Panel zoom is written straight to the element (not React state) and fitted inside
+  // ResizeObserver callbacks, which run after layout but before paint - so a browser-zoom
+  // or bar-height change is corrected in the same frame instead of flashing for a few.
+  useLayoutEffect(() => {
+    if (view !== "dashboard" || !dashShowCharts) return;
     const measure = () => {
       const el = leftPanelRef.current;
-      if (!el) return;
-      const prevZoom = el.style.zoom;
-      const prevWidth = el.style.width;
-      const prevHeight = el.style.height;
-      const prevFlex = el.style.flex;
+      const parent = el?.parentElement;
+      if (!el || !parent) return;
+      // The parent is the actual space the panel gets (minHeight 0, sized by the layout),
+      // so fit against it rather than a formula estimate.
+      const bH = barHidden ? 0 : ctrlBarH;
+      const availH = (parent.clientHeight || (window.innerHeight - bH - 12) * (dashAltLayout ? 0.52 : 1)) - 2;
+      const availW = (parent.clientWidth || Math.round(window.innerWidth * (dashAltLayout ? 1 : 0.33))) - 4;
+      const prev = { zoom: el.style.zoom, width: el.style.width, height: el.style.height, flex: el.style.flex };
       el.style.zoom = '1';
-      el.style.width = 'max-content';
       el.style.height = 'max-content';
       el.style.flex = 'none';
-      const natH = el.scrollHeight;
+      el.style.width = 'max-content';
       const natW = el.scrollWidth;
-      el.style.zoom = prevZoom;
-      el.style.width = prevWidth;
-      el.style.height = prevHeight;
-      el.style.flex = prevFlex;
-      if (natH < 10 || natW < 10) return;
-      const bH = barHidden ? 0 : (document.querySelector('[data-controlbar]')?.offsetHeight || 0);
-      const availH = (window.innerHeight - bH - 12) * (dashAltLayout ? 0.52 : 1);
-      const availW = (el.parentElement?.offsetWidth || Math.round(window.innerWidth * (dashAltLayout ? 1 : 0.33))) - 4;
-      const z = Math.min(availH / natH, availW / natW, 3);
-      setLeftPanelScale(z);
+      let z = natW >= 10 ? Math.min(availW / natW, 3) : 1;
+      // Height is re-measured at the width the panel will actually be laid out at.
+      for (let k = 0; k < 4; k++) {
+        el.style.width = (availW / z) + 'px';
+        const natH = el.scrollHeight;
+        if (natH < 10) break;
+        const zH = availH / natH;
+        if (zH >= z) break;
+        z = zH;
+      }
+      el.style.width = prev.width;
+      el.style.height = prev.height;
+      el.style.flex = prev.flex;
+      const cur = parseFloat(prev.zoom) || 1;
+      el.style.zoom = String(Math.abs(cur - z) < 0.002 ? cur : z);
     };
-    requestAnimationFrame(measure);
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    measure();
+    let alive = true;
+    document.fonts?.ready.then(() => { if (alive) measure(); });
+    // Re-fit whenever the available space or the content rows change size.
+    const ro = new ResizeObserver(measure);
+    const el = leftPanelRef.current;
+    if (el?.parentElement) ro.observe(el.parentElement);
+    if (el) for (const c of el.children) ro.observe(c);
+    return () => { alive = false; ro.disconnect(); };
   }, [view, dashShowCharts, barHidden, menuOpen, dashAltLayout]);
 
   const pdpLeading = displayPt != null && displayTt != null && displayPt >= displayTt;
@@ -5935,7 +6497,7 @@ export default function SocialBladeLive() {
 
   const dashChartTicks = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts) return [];
-    return getMidnights(curTime - dashWin * DAY_MS, curTime);
+    return thinMidnights(getMidnights(curTime - dashWin * DAY_MS, curTime), 8);
   }, [view, dashShowCharts, curTime, dashWin]);
 
   // LAYOUT: Dashboard counter helper - see LAYOUTS.md
@@ -6012,6 +6574,34 @@ export default function SocialBladeLive() {
   //   skXGapTot   - smooth key for gap   x-domain
   //   skDGapTot   - smooth key for gap   y-domain
 
+  // - Chart Explorer: opened by clicking a dashboard chart; playback is held paused while open -
+  const openExplorer = (spec) => (rect) => {
+    expWasPlayingRef.current = pb.playing;
+    if (pb.playing) dispatch({ type: "STOP" });
+    setExplorer({ ...spec, t0: Math.max(spec.t0, REAL_DATA_START_MS), strip: effectiveFilterAudits, rect, closing: false });
+  };
+  const openGainExplorer = (lbSec, t0) => {
+    const lbl = lbSec < 60 ? lbSec + "s" : lbSec < 3600 ? (lbSec / 60) + "min" : (lbSec / 3600) + "hr";
+    return openExplorer({ kind: "gain", lbSec, title: lbl + " Gain", t0, t1: curTime });
+  };
+  const closeExplorer = useCallback(() => setExplorer(e => (e && !e.closing) ? { ...e, closing: true } : e), []);
+  const finishExplorer = useCallback(() => {
+    setExplorer(null);
+    if (expWasPlayingRef.current) dispatch({ type: "PLAY" });
+    expWasPlayingRef.current = false;
+  }, []);
+  useEffect(() => {
+    if (explorer && !explorer.closing && pb.playing) dispatch({ type: "STOP" });
+  }, [explorer, pb.playing]);
+  useEffect(() => {
+    if (view !== "dashboard") { setExplorer(null); expWasPlayingRef.current = false; }
+  }, [view]);
+  const renderExplorerOverlay = (barH) => explorer && createPortal(
+    <DashExpandOverlay rect={explorer.rect} top={barH} closing={explorer.closing} onClose={closeExplorer} onClosed={finishExplorer}>
+      <ChartExplorer spec={explorer} curTime={curTime} ready={realDataReady} onClose={closeExplorer} dc={eDC} dev={devMode} chan={dashChanFilter}/>
+    </DashExpandOverlay>,
+    document.body);
+
   // LAYOUT: Dashboard chart card renderer - see LAYOUTS.md
   const renderDashGainChart = (ci, h, cfg) => {
     // 5min toggle: swap ci=1 (10min lookback) to ci=8 (5min lookback) when enabled
@@ -6058,7 +6648,7 @@ export default function SocialBladeLive() {
     const dom = dashGetRange(gd, _chanKeys, curTime, tMin);
     const yTicks = niceTicks(dom, true);
     const edgeBufG = (curTime - tMin) * 0.1;
-    const allMidnightsG = getMidnights(tMin, curTime);
+    const allMidnightsG = thinMidnights(getMidnights(tMin, curTime), 6);
     const midnightTicksG = allMidnightsG.filter(m => m - tMin > edgeBufG && curTime - m > edgeBufG);
     const _midStepG = Math.ceil(midnightTicksG.length / 6);
     const _shownMidnightsG = _midStepG > 1 ? midnightTicksG.filter((_,i) => i % _midStepG === 0) : midnightTicksG;
@@ -6081,11 +6671,10 @@ export default function SocialBladeLive() {
             <button onClick={() => setDashGain5min(true)} style={miniTogBtn(dashGain5min)}>5m</button>
           </React.Fragment>
         )}
-        {lbMins > 1 && <button onClick={() => setDashGainPerMin(v => !v)} style={miniTogBtn(dashGainPerMin)}>/min</button>}
       </React.Fragment>
     );
     return (
-      <DashChartCard title={(dashGainPerMin && lbMins > 1) ? cfg.gainLabels[effectiveCi].replace("Gain", "avg") : cfg.gainLabels[effectiveCi]} dc={eDC} controls={cardControls}>
+      <DashChartCard title={(dashGainPerMin && lbMins > 1) ? cfg.gainLabels[effectiveCi].replace("Gain", "avg") : cfg.gainLabels[effectiveCi]} dc={eDC} controls={cardControls} onExpand={openGainExplorer(Math.round(lb * 3600), tMin)}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gd} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
@@ -6114,7 +6703,7 @@ export default function SocialBladeLive() {
     const dom = dashGetRange(gd, ["gap"], curTime, tMin);
     const yTicks = niceTicks(dom, true);
     const edgeBufGap = (curTime - tMin) * 0.1;
-    const allMidnightsGap = getMidnights(tMin, curTime);
+    const allMidnightsGap = thinMidnights(getMidnights(tMin, curTime), 6);
     const midnightTicksGap = allMidnightsGap.filter(m => m - tMin > edgeBufGap && curTime - m > edgeBufGap);
     const _midStepGap = Math.ceil(midnightTicksGap.length / 6);
     const _shownMidnightsGap = _midStepGap > 1 ? midnightTicksGap.filter((_,i) => i % _midStepGap === 0) : midnightTicksGap;
@@ -6130,7 +6719,7 @@ export default function SocialBladeLive() {
       return xFmtBaseGap(ts);
     };
     return (
-      <DashChartCard title={gapLabel} dc={eDC}>
+      <DashChartCard title={gapLabel} dc={eDC} onExpand={openExplorer({ kind: "gap", title: "Subscriber Gap", t0: tMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gd} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
@@ -6211,7 +6800,7 @@ export default function SocialBladeLive() {
     <div style={{background:eDC.BG,color:eDC.TEXT,fontFamily:dashFont,width:"100%",height:`calc(100vh - ${barH}px)`,display:"flex",flexDirection:"row",overflow:"hidden"}}>
       {/* LEFT PANEL */}
       <div style={{width:"33%",minWidth:220,flexShrink:0,overflow:"hidden",borderRight:"1px solid "+eDC.BORDER,display:"flex",alignItems:"flex-start",justifyContent:"flex-start"}}>
-        <div ref={leftPanelRef} style={{zoom:leftPanelScale,width:"100%",padding:"10px 14px 10px 24px",boxSizing:"border-box"}}>
+        <div ref={leftPanelRef} style={{width:"100%",padding:"10px 14px 10px 24px",boxSizing:"border-box"}}>
           {/* Channel A */}
           <div style={{paddingBottom:8,marginBottom:0}}>
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
@@ -6333,8 +6922,8 @@ export default function SocialBladeLive() {
     <div style={{background:eDC.BG,color:eDC.TEXT,fontFamily:dashFont,width:"100%",height:`calc(100vh - ${barH}px)`,display:"flex",flexDirection:"column",overflow:"hidden",padding:"8px 12px 4px",boxSizing:"border-box",gap:6}}>
 
       {/* Rows 1+2 — zoom-scaled to fit top portion of viewport */}
-      <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column"}}>
-        <div ref={leftPanelRef} style={{zoom:leftPanelScale,flex:1,width:"100%",display:"flex",flexDirection:"column"}}>
+      <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div ref={leftPanelRef} style={{flex:1,width:"100%",display:"flex",flexDirection:"column"}}>
           {/* Row 1: PDP | TS | Timezones */}
           <div style={{display:"flex",flexDirection:"row",alignItems:"stretch",gap:8,marginBottom:6,flex:1}}>
             {/* Channel A */}
@@ -6481,7 +7070,7 @@ export default function SocialBladeLive() {
     const totXDom = [totTMin, curTime];
     const gapXDom = [totTMin, curTime];
     const subsCard = (
-      <DashChartCard title={cfg.totalTitle} dc={eDC}>
+      <DashChartCard title={cfg.totalTitle} dc={eDC} onExpand={openExplorer({ kind: "subs", title: "Total Subscribers", t0: totTMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={cfg.totalData} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
@@ -6497,7 +7086,7 @@ export default function SocialBladeLive() {
       </DashChartCard>
     );
     const gapCard = (
-      <DashChartCard title={cfg.gapTitle} dc={eDC}>
+      <DashChartCard title={cfg.gapTitle} dc={eDC} onExpand={openExplorer({ kind: "gap", title: "Subscriber Gap", t0: totTMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={cfg.totalData} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
@@ -6542,8 +7131,8 @@ export default function SocialBladeLive() {
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
       `}</style>
       {/* - Control Bar - */}
-      {!barHidden && <div data-controlbar style={{ borderBottom:"1px solid #333", fontFamily:"'Inter',system-ui,-apple-system,'Segoe UI',sans-serif", fontSize:12, color:"#ccc" }}>
-        {menuOpen && <div style={{ padding:"4px 14px 6px", display:"flex", alignItems:"stretch", gap:0, flexWrap:"nowrap" }}>
+      {!barHidden && <div data-controlbar ref={ctrlBarRef} style={{ borderBottom:"1px solid #333", fontFamily:"'Inter',system-ui,-apple-system,'Segoe UI',sans-serif", fontSize:12, color:"#ccc" }}>
+        {menuOpen && <div style={{ padding:"4px 14px 6px", display:"flex", alignItems:"stretch", gap:0, rowGap:6, flexWrap:"wrap", whiteSpace:"nowrap" }}>
 
           {/* PLAY */}
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
@@ -6604,7 +7193,7 @@ export default function SocialBladeLive() {
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
           {/* SEEK */}
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,flex:1,minWidth:140}}>
+          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,flex:"1 1 340px",minWidth:340}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SEEK</span>
             <div style={{display:"flex",alignItems:"center",gap:6}}>
               <input type="range" min={SEEK_START} max={effectiveMaxIdx} step="any" value={pos} onChange={e=>{const v=+e.target.value;setPos(v);posRef.current=v;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});if(musicArrowSeek)musicPickRandom(false);}} onMouseUp={e=>e.target.blur()} onTouchEnd={e=>e.target.blur()} style={{flex:1,accentColor:"#4a6080",cursor:"pointer"}}/>
@@ -6642,17 +7231,32 @@ export default function SocialBladeLive() {
               <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>{view==="dashboard"?"DASHBOARD":view==="flare"?"FLARE":"SOCIALBLADE"}</span>
               <div style={{display:"flex",alignItems:"center",gap:5}}>
                 {view==="dashboard" && <button onClick={()=>setDashLayout(v=>(v+1)%3)} style={{ background:"#1a2535", color:"#9bbfdf", border:"1px solid #2d4060", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{dashLayout===0?"Default":dashLayout===1?"Default+":"Alt"}</button>}
+                {view==="dashboard" && <button onClick={()=>setDashGainPerMin(v=>!v)} title="Show gain charts as average subs per minute" style={{ background:dashGainPerMin?"#1a2535":"transparent", color:dashGainPerMin?"#9bbfdf":"#777", border:"1px solid "+(dashGainPerMin?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>/min</button>}
                 {view==="dashboard" && <button onClick={()=>setFilterAudits(v=>!v)} title="Strip audits from charts; mark audit timestamps" style={{ background:filterAudits?"#1a2535":"transparent", color:filterAudits?"#9bbfdf":"#777", border:"1px solid "+(filterAudits?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Filter Audits</button>}
                 {view==="dashboard" && <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
                   {[['both','Both'],['pdp','PDP'],['ts','TS']].map(([v,lbl])=>(
                     <button key={v} onClick={()=>setDashChanFilter(v)} style={{background:dashChanFilter===v?"#1a2535":"transparent",color:dashChanFilter===v?"#9bbfdf":"#777",border:"none",borderLeft:v==='both'?"none":"1px solid #1e1e1e",padding:"4px 10px",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:dashChanFilter===v?600:400}}>{lbl}</button>
                   ))}
                 </div>}
+                {view==="dashboard" && <label title="Long Charts Window (days): Sub Gap, Total Subs and 24h Gain use this window; 12h Gain uses half, 48h Gain uses twice" style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:12,color:"#777",marginLeft:4}}>
+                  Long Window
+                  <input type="number" min={1} step={1} value={dashWin}
+                    onChange={e=>{ const v=Math.round(Number(e.target.value)); if (v>=1) setDashWin(v); }}
+                    style={{width:44,background:"#0a0c14",color:"#9bbfdf",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 4px",fontSize:12,fontFamily:"inherit"}}/>
+                  d
+                </label>}
 
                 {view==="flare" && <button onClick={()=>setFlareDark(v=>!v)} style={{ background:"transparent", color:"#999", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{flareDark?"Light Mode":"Dark Mode"}</button>}
                 {view==="flare" && <button onClick={()=>setFlareNewsFeed(v=>!v)} style={{ background:flareNewsFeed?"#1a2535":"transparent", color:flareNewsFeed?"#7cb9f7":"#777", border:"1px solid "+(flareNewsFeed?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>News Feed</button>}
                 {view==="socialblade" && <button onClick={()=>setSbDark(v=>!v)} style={{ background:"transparent", color:"#999", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{sbDark?"Light Mode":"Dark Mode"}</button>}
                 {view==="socialblade" && <button onClick={()=>setSbOvertake(v=>!v)} style={{ background:sbOvertake?"#1a2535":"transparent", color:sbOvertake?"#9bbfdf":"#777", border:"1px solid "+(sbOvertake?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Predict Overtake</button>}
+                {view==="socialblade" && <label title="Window (days) of the main Sub Gap chart" style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:12,color:"#777",marginLeft:4}}>
+                  Sub Gap Window
+                  <input type="number" min={1} step={1} value={sbGapWin}
+                    onChange={e=>{ const v=Math.round(Number(e.target.value)); if (v>=1) setSbGapWin(v); }}
+                    style={{width:44,background:"#0a0c14",color:"#9bbfdf",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 4px",fontSize:12,fontFamily:"inherit"}}/>
+                  d
+                </label>}
                 {view==="socialblade" && <button onClick={()=>dispatch({type:"TOGGLE_MINUTE_SNAP"})} title="Update tables once every minute - otherwise, updates every second" style={{ background:minuteSnap?"#1a2535":"transparent", color:minuteSnap?"#7cb9f7":"#777", border:"1px solid "+(minuteSnap?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Snap</button>}
               </div>
             </div>
@@ -6937,15 +7541,29 @@ export default function SocialBladeLive() {
                   const h = d.getUTCHours(), h12 = h % 12 || 12, ap = h < 12 ? 'am' : 'pm';
                   return `${mon} ${String(d.getUTCDate()).padStart(2,'0')} ${h12}${ap}`;
                 };
+                // Subs both channels have at the predicted crossover ("87.1 M", "90 M"); blank if none predicted.
+                const fmtXSubs = (ri) => {
+                  const pr = Math.round(subsPerMinTable.pdp[ri]), tr = Math.round(subsPerMinTable.ts[ri]);
+                  const pt = tableDisplayPt, otGap = pt != null && tableDisplayTt != null ? pt - tableDisplayTt : null;
+                  if (pt == null || otGap == null || otGap <= 0 || subsPerMinTable.pdp[ri] == null || subsPerMinTable.ts[ri] == null || tr <= pr) return "";
+                  const m = Math.round((pt + pr * (otGap / (tr - pr))) / 1e5) / 10;
+                  return (Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)) + " M";
+                };
                 const wrapCell = (cs) => ({ ...cs, whiteSpace:"normal", lineHeight:1.2, height:42, maxHeight:42, verticalAlign:"middle", padding:"1px 3px" });
-                return (
+                return (<>
                   <tr>
                     <td colSpan={5} style={wrapCell({...cellStyle(323,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>T-Series Passes PewDiePie Estimate<br/>(Time Zone ET)</td>
                     {[4,5,6,7,8,9,10].map(ri => (
                       <td key={ri} style={wrapCell({...cellStyle(60,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>{fmtOT(ri)}</td>
                     ))}
                   </tr>
-                );
+                  <tr>
+                    <td colSpan={5} style={{...cellStyle(323,21,"left",sbDark), fontWeight:"bold", fontSize:15}}>Est Subs at Crossover</td>
+                    {[4,5,6,7,8,9,10].map(ri => (
+                      <td key={ri} style={{...cellStyle(60,21,"left",sbDark), fontSize:15}}>{fmtXSubs(ri)}</td>
+                    ))}
+                  </tr>
+                </>);
               })() : (
               <tr>
                 <td colSpan={6} style={{...cellStyle(383,21,"left",sbDark),fontSize:15}}>{tableDisplayPt!=null&&tableDisplayPt<99000000?`PewDiePie to 100M by: ${fmtEta(pdp100Eta)}`:""}</td>
@@ -6961,7 +7579,7 @@ export default function SocialBladeLive() {
         </div>
 
         {/* = Audit Table = */}
-        <div style={{ position:"absolute", left:sbOvertake?497:479, top:sbOvertake?606:593, width:232, height:58, zIndex:10, transform:sbOvertake?"scale(0.88)":"none", transformOrigin:"top left" }}>
+        <div style={{ position:"absolute", left:sbOvertake?523:479, top:sbOvertake?620:593, width:232, height:58, zIndex:10, transform:sbOvertake?"scale(0.66)":"none", transformOrigin:"top left" }}>
           <table style={{ borderCollapse:"collapse", fontFamily:"Times New Roman, serif", fontSize:13, color:sbDark?"#fff":"#000", lineHeight:"17px" }}>
             <thead><tr>
               <th style={{...auditCellStyle("center",sbDark),fontWeight:"bold"}}>Name</th>
@@ -6982,7 +7600,7 @@ export default function SocialBladeLive() {
             { title: "PewDiePie HQ",    flagCode: "gb", city: "Brighton",  getOffset: _getUKOffset },
             { title: "T-Series HQ",     flagCode: "in", city: "New Delhi", getOffset: () => 5.5 },
           ];
-          const containerLeft = 0, containerTop = 610, containerWidth = 475;
+          const containerLeft = 0, containerTop = sbOvertake ? 626 : 610, containerWidth = 475;
           const frameWidth = 150, frameHeight = 80;
           const gap = (containerWidth - frameWidth * zones.length) / (zones.length - 1);
           return (
@@ -7283,6 +7901,7 @@ export default function SocialBladeLive() {
             rtPeriodSec={rtPeriodSec}
             dark={flareDark}
             newsFeed={flareNewsFeed}
+            tickerNudge={tickerNudge}
             extraInfo={flareExtraInfo}
             subsPerMinTable={subsPerMinTable}
             leadMs={flareLeadMs}
@@ -7298,11 +7917,11 @@ export default function SocialBladeLive() {
       {/* - Dashboard View - */}
       {/* LAYOUT: Dashboard entry point - see LAYOUTS.md */}
       {view === "dashboard" && (() => {
-        const barH = barHidden ? 0 : (document.querySelector('[data-controlbar]')?.offsetHeight || 0);
+        const barH = barHidden ? 0 : ctrlBarH;
         const normalMilestoneEl = <DashMilestone pdpSubs={mileDisplayPt} tsSubs={mileDisplayTt} pdpDaily={predRatePdp} tsDaily={predRateTs} curTime={curTime} dc={eDC} duration={isRTMode?dur:0} seekToken={seekToken} altLayout={false}/>;
         const dashMilestoneEl = normalMilestoneEl;
         if (dashShowCharts) {
-          return renderDualDashboard({
+          const dashEl = renderDualDashboard({
             barH,
             chanA:{ icon:pdpIcon, name:"PewDiePie", color:eDC.PDP, display:displayPt,
               rateLabels:["1 Min","1 Hour","1 Day"],
@@ -7335,6 +7954,7 @@ export default function SocialBladeLive() {
               {TIMEZONES.map(z=>{const off=z.getOffset(tzDisplayMs);const label=z.label==="EST"?(off===-4?"EDT":"EST"):z.label==="GMT"?(off===1?"BST":"GMT"):z.label;const d=new Date(tzDisplayMs+off*3600000);const dateStr=d.toLocaleDateString("en-US",{timeZone:"UTC",weekday:"short",month:"long",day:"numeric",year:"numeric"});const timeStr=String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0");return(<div key={z.label} style={{marginBottom:3}}><div>{dateStr}</div><div><span style={{color:eDC.TEXT,fontWeight:600}}>{timeStr}{" "}{label}</span>{" "}<span style={{fontSize:14,fontFamily:"'Twemoji Country Flags',Arial,sans-serif"}}>{z.flag}</span></div></div>);})}
             </div>):null,
           });
+          return <>{dashEl}{renderExplorerOverlay(barH)}</>;
         }
         // LAYOUT: Dashboard no-charts fallback entry point - see LAYOUTS.md
         return (

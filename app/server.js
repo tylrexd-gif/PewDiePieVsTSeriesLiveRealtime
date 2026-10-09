@@ -197,11 +197,13 @@ const server = http.createServer((req, res) => {
   });
 });
 
+let _tryPort = PORT;
 server.on('error', e => {
   if (e.code === 'EADDRINUSE') {
-    const fallback = PORT + 1;
-    console.warn(`Port ${PORT} in use, trying ${fallback}...`);
-    server.listen(fallback);
+    _tryPort += 1;
+    if (_tryPort > PORT + 10) { console.error('No free port found, giving up.'); process.exit(1); }
+    console.warn(`Port ${_tryPort - 1} in use, trying ${_tryPort}...`);
+    server.listen(_tryPort);
   } else throw e;
 });
 
