@@ -1,5 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { Analytics } from '@vercel/analytics/react'
 import SocialBladeLive from './App.jsx'
 
 class ErrorBoundary extends React.Component {
@@ -21,5 +22,6 @@ window._setStage && window._setStage('Starting React');
 ReactDOM.createRoot(document.getElementById('root')).render(
   <ErrorBoundary>
     <SocialBladeLive />
+    <Analytics />
   </ErrorBoundary>
 )
