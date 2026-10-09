@@ -69,6 +69,14 @@
         bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
       };
       window._setStage = function() {};
+      window._setLoadingBar = function() {}; // the bar shows only the data binary's progress
+      window._setDataProgress = function(loaded, total) {
+        var pct = total > 0 ? Math.min(100, Math.floor(100 * loaded / total)) : 0;
+        var bar = document.getElementById('loading-bar');
+        var txt = document.getElementById('loading-stage');
+        if (bar) { bar.classList.remove('indeterminate'); bar.style.width = pct + '%'; }
+        if (txt) txt.textContent = 'Loading data… ' + pct + '%';
+      };
       window._dismissLoading = function() {
         clearInterval(_timer);
         var el = document.getElementById('loading');
@@ -132,6 +140,7 @@
   <body>
     <div id="loading">
       <div id="loading-stage">Loading data…</div>
+      <div id="loading-bar-wrap"><div id="loading-bar" class="indeterminate"></div></div>
     </div>
     <div id="root"></div>
   </body>

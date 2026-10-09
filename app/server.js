@@ -180,7 +180,7 @@ const server = http.createServer((req, res) => {
       const filePath = path.join(ROOT, 'data', decodeURIComponent(url.slice(6)));
       fs.readFile(filePath, (err, data) => {
         if (err) { res.writeHead(404); res.end('Not found'); return; }
-        res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream' });
+        res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream', 'Content-Length': data.length });
         res.end(data);
       });
     } else {
@@ -192,7 +192,7 @@ const server = http.createServer((req, res) => {
   const filePath = path.join(ROOT, decodeURIComponent(url === '/' ? 'index.html' : url));
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream', 'Content-Length': data.length });
     res.end(data);
   });
 });

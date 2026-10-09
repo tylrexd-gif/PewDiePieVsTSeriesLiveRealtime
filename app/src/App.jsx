@@ -648,11 +648,41 @@ const REAL_DATA_HOURS = 4704; // 196 days * 24 hours - playhead range in hour un
 let _realDataBuf = null;      // Uint32Array once loaded
 let _realDataLoading = false;
 
+// Streams the binary so the loading screen can show real download progress.
+async function _fetchWithProgress(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const hdrLen = Number(r.headers.get('content-length')) || 0;
+  // A compressed response's Content-Length is the compressed size, so only trust it uncompressed.
+  const exactLen = r.headers.get('content-encoding') ? 0 : hdrLen;
+  const total = exactLen || REAL_DATA_PAIR_COUNT * 8;
+  if (!r.body) { const ab = await r.arrayBuffer(); window._setDataProgress?.(ab.byteLength, ab.byteLength); return ab; }
+  const reader = r.body.getReader();
+  let out = exactLen ? new Uint8Array(exactLen) : null;
+  const chunks = [];
+  let got = 0, lastUi = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (out && got + value.length <= out.length) out.set(value, got);
+    else { if (out) { chunks.push(out.subarray(0, got)); out = null; } chunks.push(value); }
+    got += value.length;
+    const now = performance.now();
+    if (now - lastUi > 50) { lastUi = now; window._setDataProgress?.(got, total); }
+  }
+  window._setDataProgress?.(got, Math.max(got, total));
+  if (out && got === out.length) return out.buffer;
+  if (out) chunks.unshift(out.subarray(0, got));
+  const all = new Uint8Array(got);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  return all.buffer;
+}
+
 function _loadRealData(onDone, file = 'every_second_counts_pvt_u32le.bin') {
   if (_realDataLoading) return;
   _realDataLoading = true;
-  fetch('/data/' + file)
-    .then(r => r.arrayBuffer())
+  _fetchWithProgress('/data/' + file)
     .then(ab => { _realDataBuf = new Uint32Array(ab); _realDataLoading = false; if (onDone) onDone(); })
     .catch(() => { _realDataLoading = false; if (onDone) onDone(); });
 }
