@@ -4835,7 +4835,7 @@ export default function SocialBladeLive() {
   // Compute "Now" position: map current real-world clock to 2019 timeline
   const initNowPos = useMemo(() => {
     const now = new Date(Date.now() - 4*60*60*1000);
-    const target = Date.UTC(2019, now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds());
+    const target = Date.UTC(now.getUTCMonth() >= 9 ? 2018 : 2019, now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds());
     return tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, target)));
   }, []);
 
@@ -7203,6 +7203,25 @@ export default function SocialBladeLive() {
             <div style={{display:"flex",alignItems:"center",gap:4}}>
               <button onClick={()=>dispatch({type:"TOGGLE_PLAY"})} style={{ background:playing?"#162036":"#162016", color:playing?"#6baee8":"#5dba6e", border:"none", borderRadius:5, padding:"5px 14px", fontWeight:700, fontSize:15, cursor:"pointer", fontFamily:"inherit", minWidth:44 }}>{playing?"⏸":"▶"}</button>
               <button onClick={()=>dispatch({type:"TOGGLE_REVERSE"})} title="Reverse playback" style={{ background:reverse?"#1e2535":"transparent", color:reverse?"#8aaccc":"#777", border:"1px solid "+(reverse?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"5px 10px", fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>{"◀"}</button>
+              <button onClick={()=>{
+                const now = new Date(Date.now() - 4*60*60*1000); // shift UTC -> EDT
+                const target = Date.UTC(now.getUTCMonth() >= 9 ? 2018 : 2019, now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds());
+                const p = tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, target)));
+                posRef.current = p; setPos(p);
+                clearRT();
+                dispatch({type:"BUMP_SEEK"});
+                dispatch({type:"SET_MODE", mode:"rt"});
+                // Flare wants one coherent live clock; SB / Dashboard want desync + minute snap.
+                if (view === "flare") {
+                  dispatch({type:"SET_DESYNC", value:0});
+                  if (minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
+                } else {
+                  dispatch({type:"SET_DESYNC", value:0.7});
+                  if (!minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
+                }
+                dispatch({type:"SET_MULT", mult:1});
+                dispatch({type:"PLAY"});
+              }} title="Jump to real-world clock time mapped to 2019, switch to RT, play" style={{ background:"transparent", color:"#777", border:"1px solid #1e1e1e", borderRadius:4, padding:"5px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>Now</button>
             </div>
           </div>
 
