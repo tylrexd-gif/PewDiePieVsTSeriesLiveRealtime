@@ -1369,6 +1369,15 @@ const injectRdAuditBreakpoints = (data) => {
 };
 
 // Convert timestamp to fractional RAW index position
+// "Now": the current real-world instant moved onto the 2018-19 timeline
+// (Oct-Dec -> 2018, Jan-Sep -> 2019). Data timestamps are true UTC, so the
+// UTC fields are carried over as-is - no ET shift here.
+const nowToPos = () => {
+  const now = new Date();
+  const target = Date.UTC(now.getUTCMonth() >= 9 ? 2018 : 2019, now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds());
+  return tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, target)));
+};
+
 const tsToPos = (ts) => {
   if (!RAW.length) return (ts - REAL_DATA_START_MS) / HOUR_MS;
   if (ts <= RAW[0].t) return 0;
@@ -4833,15 +4842,25 @@ export default function SocialBladeLive() {
   }, [mult]);
 
   // Compute "Now" position: map current real-world clock to 2019 timeline
-  const initNowPos = useMemo(() => {
-    const now = new Date(Date.now() - 4*60*60*1000);
-    const target = Date.UTC(now.getUTCMonth() >= 9 ? 2018 : 2019, now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds());
-    return tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, target)));
-  }, []);
+  const initNowPos = useMemo(() => nowToPos(), []);
 
-  const [pos, setPos] = useState(() => _ss.pos != null ? _ss.pos : tsToPos(Date.UTC(2018, 9, 18, 4, 0)));
+  // STARTUP: always lands on Now, ignoring the saved position.
+  const [pos, setPos] = useState(initNowPos);
   const [menuOpen, setMenuOpen] = useState(() => _ss.menuOpen != null ? _ss.menuOpen : true);
-  const [barHidden, setBarHidden] = useState(() => _ss.barHidden ?? false);
+  const [barHidden, setBarHidden] = useState(true); // STARTUP: always fully hidden
+  // While the bar is hidden, mousing near the top edge shows a "Press H" hint.
+  const [barHintVisible, setBarHintVisible] = useState(false);
+  useEffect(() => {
+    if (!barHidden) { setBarHintVisible(false); return; }
+    const onMove = (e) => setBarHintVisible(e.clientY < 80);
+    const onLeave = () => setBarHintVisible(false);
+    window.addEventListener("mousemove", onMove);
+    document.documentElement.addEventListener("mouseleave", onLeave);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      document.documentElement.removeEventListener("mouseleave", onLeave);
+    };
+  }, [barHidden]);
   // Live playback-bar height: it wraps / changes with zoom and per-view controls, so track it.
   const [ctrlBarH, setCtrlBarH] = useState(0);
   const ctrlBarRoRef = useRef(null);
@@ -4859,9 +4878,9 @@ export default function SocialBladeLive() {
   // Y-domains to round nice-number ticks containing the range (like the hist gap
   // charts) instead of the tight min/max - so the axis only steps at round
   // thresholds rather than drifting every frame.
-  const [view, setView] = useState(() => _ss.view ?? "socialblade");
+  const [view, setView] = useState("socialblade"); // STARTUP: always SocialBlade
   const [dashWin, setDashWin] = useState(() => _ss.dashWin ?? 7);
-  const [sbGapWin, setSbGapWin] = useState(() => _ss.sbGapWin ?? 7);
+  const [sbGapWin, setSbGapWin] = useState(14); // STARTUP: always 14d
   const [dashChanFilter, setDashChanFilter] = useState('both'); // 'both'|'pdp'|'ts'
   const dashShowCharts = true;
   // Per-second mode (standard dashboard): swaps the 1min-gain chart for a 1s-gain
@@ -4889,8 +4908,8 @@ export default function SocialBladeLive() {
   // channel card. Extra Info is only meaningful when the Flare view is active.
   const [flareDark, setFlareDark] = useState(() => _ss.flareDark ?? false);
   const [flareNewsFeed, setFlareNewsFeed] = useState(() => _ss.flareNewsFeed ?? true);
-  const [sbDark, setSbDark] = useState(() => _ss.sbDark ?? true);
-  const [sbOvertake, setSbOvertake] = useState(() => _ss.sbOvertake ?? false);
+  const [sbDark, setSbDark] = useState(true); // STARTUP: always dark
+  const [sbOvertake, setSbOvertake] = useState(true); // STARTUP: always on
   // SB region background colors. Charts/center always black per design. Cards use SB site palette in light mode.
   const SB_CARD_BG   = sbDark ? "#000" : "#e6e9ec";  // SB site page bg (#e6e9ec) for sub-counter cards
   const SB_CHART_BG  = SB_CARD_BG;                      // 60-min chart plot area
@@ -4926,29 +4945,23 @@ export default function SocialBladeLive() {
   const [artist, setArtist] = useState("");
   const [song, setSong] = useState("");
   const [histStartIdx, setHistStartIdx] = useState(() => _ss.histStartIdx ?? HIST_START);
-  const [rtInterval, setRtInterval] = useState(() => _ss.rtInterval ?? 2); // RT update interval in seconds (1, 2, or 3)
-  const posRef = useRef(_ss.pos != null ? _ss.pos : initNowPos);
+  const [rtInterval, setRtInterval] = useState(2); // STARTUP: always 2s. RT update interval in seconds (1, 2, or 3)
+  const posRef = useRef(initNowPos);
   const effectiveMultRef = useRef(mult);
 
-  // Auto-start in Now mode on first load
+  // STARTUP: every load is forced to the same preset regardless of saved
+  // state - SocialBlade, dark, Predict Overtake, 14d Sub Gap, Realtime at 1x,
+  // 2s counter interval, 0.69 desync, Snap on, at Now and playing. The view /
+  // toggle / interval / position parts are set in their useState inits above.
   const didInit = useRef(false);
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    const ss = _ssRef.current;
-    if (ss && ss.speedMode && ss.speedMode !== "1h") {
-      dispatch({type:"SET_MODE", mode: ss.speedMode});
-      if (ss.mult != null && ss.mult !== 1) dispatch({type:"SET_MULT", mult: ss.mult});
-      if (ss.desync != null) dispatch({type:"SET_DESYNC", value: ss.desync});
-      if (ss.minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
-      if (ss.dyn) dispatch({type:"TOGGLE_DYN"});
-      if (ss.reverse) dispatch({type:"TOGGLE_REVERSE"});
-      if (ss.playing) dispatch({type:"PLAY"});
-    } else {
-      dispatch({type:"SET_MODE", mode:"rt"});
-      dispatch({type:"SET_DESYNC", value:0.7});
-      dispatch({type:"PLAY"});
-    }
+    dispatch({type:"SET_MODE", mode:"rt"});
+    dispatch({type:"SET_MULT", mult:1});
+    dispatch({type:"SET_DESYNC", value:0.69});
+    if (!initialPlayback.minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
+    dispatch({type:"PLAY"});
   }, []);
 
   useEffect(() => { if (realDataReady) window._dismissLoading?.(); }, [realDataReady]);
@@ -5606,6 +5619,20 @@ export default function SocialBladeLive() {
   const currentGap = (isRTMode && rtDisplay.gap != null)
     ? rtDisplay.gap
     : (displayPt != null && displayTt != null ? displayPt - displayTt : null);
+
+  // Predict Overtake only takes effect while an overtake is still ahead: the
+  // gap must be > 0 and at least one of the 1-30 day avg columns must have
+  // T-Series gaining faster than PewDiePie. Re-evaluated only when the table
+  // updates (tableTime), not on every counter tick.
+  const sbOvertakeActive = useMemo(() => {
+    if (!sbOvertake) return false;
+    const gap = tableDisplayPt != null && tableDisplayTt != null ? tableDisplayPt - tableDisplayTt : currentGap;
+    if (gap == null || gap <= 0) return false;
+    return [4,5,6,7,8,9,10].some(ri => {
+      const p = subsPerMinTable.pdp[ri], t = subsPerMinTable.ts[ri];
+      return p != null && t != null && Math.round(t) > Math.round(p);
+    });
+  }, [sbOvertake, tableTime, subsPerMinTable]);
 
   // effectiveSpeed: absolute sim-sec/real-sec shown next to the Dynamic button.
   // Multiplied by modeBaseSec so 1min/s and 1hr/s modes display the true combined rate.
@@ -7193,6 +7220,9 @@ export default function SocialBladeLive() {
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
       `}</style>
+      {barHidden && <div style={{ position:"fixed", top:16, left:"50%", transform:`translate(-50%, ${barHintVisible ? 0 : -12}px)`, opacity:barHintVisible ? 1 : 0, transition:"opacity 0.2s, transform 0.2s", pointerEvents:"none", zIndex:10000, background:"rgba(14,16,24,0.95)", color:"#fff", border:"1px solid #2d4060", borderRadius:8, padding:"12px 24px", fontSize:20, fontWeight:600, boxShadow:"0 6px 24px rgba(0,0,0,0.6)", whiteSpace:"nowrap" }}>
+        Press <span style={{ display:"inline-block", background:"#1a2535", color:"#7cb9f7", border:"1px solid #2d4060", borderRadius:4, padding:"0 8px", margin:"0 2px" }}>H</span> to show playback bar
+      </div>}
       {/* - Control Bar - */}
       {!barHidden && <div data-controlbar ref={ctrlBarRef} style={{ borderBottom:"1px solid #333", fontFamily:"'Inter',system-ui,-apple-system,'Segoe UI',sans-serif", fontSize:12, color:"#ccc" }}>
         {menuOpen && <div style={{ padding:"4px 14px 6px", display:"flex", alignItems:"stretch", gap:0, rowGap:6, flexWrap:"wrap", whiteSpace:"nowrap" }}>
@@ -7204,9 +7234,7 @@ export default function SocialBladeLive() {
               <button onClick={()=>dispatch({type:"TOGGLE_PLAY"})} style={{ background:playing?"#162036":"#162016", color:playing?"#6baee8":"#5dba6e", border:"none", borderRadius:5, padding:"5px 14px", fontWeight:700, fontSize:15, cursor:"pointer", fontFamily:"inherit", minWidth:44 }}>{playing?"⏸":"▶"}</button>
               <button onClick={()=>dispatch({type:"TOGGLE_REVERSE"})} title="Reverse playback" style={{ background:reverse?"#1e2535":"transparent", color:reverse?"#8aaccc":"#777", border:"1px solid "+(reverse?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"5px 10px", fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>{"◀"}</button>
               <button onClick={()=>{
-                const now = new Date(Date.now() - 4*60*60*1000); // shift UTC -> EDT
-                const target = Date.UTC(now.getUTCMonth() >= 9 ? 2018 : 2019, now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds());
-                const p = tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, target)));
+                const p = nowToPos();
                 posRef.current = p; setPos(p);
                 clearRT();
                 dispatch({type:"BUMP_SEEK"});
@@ -7618,7 +7646,7 @@ export default function SocialBladeLive() {
               <tr>{["PewDiePie",...subsPerMinTable.pdp.map((v,i)=>fmtSpm(v,lbs[i]))].map((v,i)=><td key={i} style={cellStyle(i===0?83:60,21,"left",sbDark)}>{v}</td>)}</tr>
               <tr>{["T-Series",...subsPerMinTable.ts.map((v,i)=>fmtSpm(v,lbs[i]))].map((v,i)=><td key={i} style={cellStyle(i===0?83:60,21,"left",sbDark)}>{v}</td>)}</tr>
               </>); })()}
-              {sbOvertake ? (() => {
+              {sbOvertakeActive ? (() => {
                 const fmtOT = (ri) => {
                   const pr = Math.round(subsPerMinTable.pdp[ri]), tr = Math.round(subsPerMinTable.ts[ri]);
                   const otGap = tableDisplayPt != null && tableDisplayTt != null ? tableDisplayPt - tableDisplayTt : currentGap;
@@ -7669,7 +7697,7 @@ export default function SocialBladeLive() {
         </div>
 
         {/* = Audit Table = */}
-        <div style={{ position:"absolute", left:sbOvertake?523:479, top:sbOvertake?620:593, width:232, height:58, zIndex:10, transform:sbOvertake?"scale(0.66)":"none", transformOrigin:"top left" }}>
+        <div style={{ position:"absolute", left:sbOvertakeActive?523:479, top:sbOvertakeActive?620:593, width:232, height:58, zIndex:10, transform:sbOvertakeActive?"scale(0.66)":"none", transformOrigin:"top left" }}>
           <table style={{ borderCollapse:"collapse", fontFamily:"Times New Roman, serif", fontSize:13, color:sbDark?"#fff":"#000", lineHeight:"17px" }}>
             <thead><tr>
               <th style={{...auditCellStyle("center",sbDark),fontWeight:"bold"}}>Name</th>
@@ -7690,7 +7718,7 @@ export default function SocialBladeLive() {
             { title: "PewDiePie HQ",    flagCode: "gb", city: "Brighton",  getOffset: _getUKOffset },
             { title: "T-Series HQ",     flagCode: "in", city: "New Delhi", getOffset: () => 5.5 },
           ];
-          const containerLeft = 0, containerTop = sbOvertake ? 626 : 610, containerWidth = 475;
+          const containerLeft = 0, containerTop = sbOvertakeActive ? 626 : 610, containerWidth = 475;
           const frameWidth = 150, frameHeight = 80;
           const gap = (containerWidth - frameWidth * zones.length) / (zones.length - 1);
           return (
