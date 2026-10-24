@@ -41,6 +41,14 @@ function parseRealDataAudits(text) {
   });
 }
 
+// Scenario export audits CSV: timestamp_ms,datetime_utc,channel,delta (Scenario clock).
+function parseAltAudits(text) {
+  return text.trim().split('\n').slice(1).filter(Boolean).map(line => {
+    const cols = line.split(',');
+    return { ms: +cols[0], channel: cols[2], delta: +cols[3] };
+  });
+}
+
 function buildDataBundle() {
   const data = {
     H: [],
@@ -57,8 +65,25 @@ function buildDataBundle() {
       try { return parseSimpleSheet(read('FTV Daily Real.csv')); }
       catch (e) { return []; }
     })(),
-    GAP_CROSSINGS: (() => {
-      try { return JSON.parse(read('gap_crossings.json')); }
+    // Alt Scenario datasets (used only when the AltScen flag is on).
+    ALT_AUDITS: (() => {
+      try { return parseAltAudits(read('scenario-pdp-ts-audits.csv')); }
+      catch (e) { return []; }
+    })(),
+    SB_ALT: (() => {
+      try { return parseSimpleSheet(read('SB_Alt.csv')); }
+      catch (e) { return []; }
+    })(),
+    FTV_ALT: (() => {
+      try { return parseSimpleSheet(read('FTV_Alt.csv')); }
+      catch (e) { return []; }
+    })(),
+    YT_MUSIC_D: (() => {
+      try { return parseSimpleSheet(read('YT_MUSIC_D.csv')); }
+      catch (e) { return []; }
+    })(),
+    SLOWLY_H: (() => {
+      try { return parseSimpleSheet(read('SLOWLY_H.csv')); }
       catch (e) { return []; }
     })(),
     MANUAL_PATCHES: { invalidated_audits: [], invalidated_ids: [], audit_invalidations: [], smooth_windows: [] },

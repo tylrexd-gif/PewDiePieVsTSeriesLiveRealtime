@@ -3,7 +3,7 @@
 ts_banners/
 DEV/
 RUNBOOKS/
-SCRIPTS/
+/SCRIPTS/
 CLAUDE.md
 .claude/
 helper/
@@ -16,6 +16,11 @@ app/dist/data/manual_patches.json
 app/dist/data/backup_data/
 # dev-only raw (unsmoothed) binary - local use only, never deployed
 app/dist/data/every_second_counts_pvt_u32le.raw.bin
+# per-second masters - local only; the app loads their packed .pvd.gz copies
+# (re-packed by server.js / app/scripts/pack-bin.mjs)
+app/dist/data/every_second_counts_pvt_u32le.bin
+app/dist/data/scenario-pdp-ts.bin
+app/dist/data/*.bin.*-bak
 
 # node
 app/node_modules/

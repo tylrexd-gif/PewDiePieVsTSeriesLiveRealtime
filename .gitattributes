@@ -1,2 +1,1 @@
-app/dist/data/every_second_counts_pvt_u32le.bin filter=lfs diff=lfs merge=lfs -text
 app/dist/data/every_second_counts_pvt_u32le.bin.bak filter=lfs diff=lfs merge=lfs -text

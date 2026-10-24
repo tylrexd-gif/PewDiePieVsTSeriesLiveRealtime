@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { exec } from 'child_process';
+import { packIfStale } from './scripts/pack-bin.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, 'dist');
@@ -14,6 +15,19 @@ const PATCHES_PATH = path.join(ROOT, 'data', 'manual_patches.json');
 // Without the flag: full static server + Chrome launch on port 8080 (production mode).
 const DATA_ONLY = process.argv.includes('--data');
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : DATA_ONLY ? 8081 : 8080;
+
+// The app loads the packed (.pvd.gz) per-second files; the .bin files are the local
+// masters. Re-pack any master that is newer than its packed copy (e.g. a fresh
+// Scenario export dropped in as scenario-pdp-ts.bin), so the app never sees stale data.
+for (const [bin, packed, startMs] of [
+  ['every_second_counts_pvt_u32le.bin', 'every_second_counts_pvt.pvd.gz', Date.UTC(2018, 9, 17, 4, 0, 0)],
+  ['scenario-pdp-ts.bin', 'scenario-pdp-ts.pvd.gz', undefined],   // NPT1 export: start is in its header
+]) {
+  try {
+    const r = packIfStale(path.join(ROOT, 'data', bin), path.join(ROOT, 'data', packed), startMs);
+    if (r) console.log(`Packed ${bin} -> ${packed}: ${(r.inBytes / 1e6).toFixed(1)} MB -> ${(r.outBytes / 1e6).toFixed(1)} MB`);
+  } catch (e) { console.error(`Could not pack ${bin}: ${e.message}`); }
+}
 
 
 const MIME = {
@@ -67,6 +81,14 @@ function parseRealDataAudits(text) {
   });
 }
 
+// Scenario export audits CSV: timestamp_ms,datetime_utc,channel,delta (Scenario clock).
+function parseAltAudits(text) {
+  return text.trim().split('\n').slice(1).filter(Boolean).map(line => {
+    const cols = line.split(',');
+    return { ms: +cols[0], channel: cols[2], delta: +cols[3] };
+  });
+}
+
 function buildDataBundle() {
   const data = {
     H: [],
@@ -83,8 +105,25 @@ function buildDataBundle() {
       try { return parseSimpleSheet(read('FTV Daily Real.csv')); }
       catch (e) { return []; }
     })(),
-    GAP_CROSSINGS: (() => {
-      try { return JSON.parse(read('gap_crossings.json')); }
+    // Alt Scenario datasets (used only when the AltScen flag is on).
+    ALT_AUDITS: (() => {
+      try { return parseAltAudits(read('scenario-pdp-ts-audits.csv')); }
+      catch (e) { return []; }
+    })(),
+    SB_ALT: (() => {
+      try { return parseSimpleSheet(read('SB_Alt.csv')); }
+      catch (e) { return []; }
+    })(),
+    FTV_ALT: (() => {
+      try { return parseSimpleSheet(read('FTV_Alt.csv')); }
+      catch (e) { return []; }
+    })(),
+    YT_MUSIC_D: (() => {
+      try { return parseSimpleSheet(read('YT_MUSIC_D.csv')); }
+      catch (e) { return []; }
+    })(),
+    SLOWLY_H: (() => {
+      try { return parseSimpleSheet(read('SLOWLY_H.csv')); }
       catch (e) { return []; }
     })(),
     MANUAL_PATCHES: (() => {
