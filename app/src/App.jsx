@@ -7818,8 +7818,8 @@ export default function SocialBladeLive() {
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DATA</span>
             <button onClick={()=>{ try { _saveSS({ pos: posRef.current }); localStorage.setItem('pvt_altscen', ALT_SCEN ? '0' : '1'); sessionStorage.setItem('pvt_keep_state', '1'); } catch {} window.location.reload(); }}
-              title="Alt Scenario: from Apr 11 12:00 EDT, swap the real data for the Alt Scenario datasets (reloads)"
-              style={{ background:ALT_SCEN?"#2a1a35":"transparent", color:ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN?600:400 }}>AltScen</button>
+              title="Swaps data to the alternate 'Aleksander Effect' scenario starting Apr 11 12:00 EDT"
+              style={{ background:ALT_SCEN?"#2a1a35":"transparent", color:ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN?600:400 }}>Alt Scenario</button>
           </div>
 
           {/* OPTIONS (view-specific) */}
