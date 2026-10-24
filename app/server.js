@@ -228,7 +228,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const filePath = path.join(ROOT, decodeURIComponent(url === '/' ? 'index.html' : url));
+  // /alt (Alt Scenario) serves the same app; /alt/<file> maps to /<file>.
+  const pageUrl = /^\/alt(\/|$)/.test(url) ? (url.slice(4) || '/') : url;
+  const filePath = path.join(ROOT, decodeURIComponent(pageUrl === '/' ? 'index.html' : pageUrl));
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream', 'Content-Length': data.length });

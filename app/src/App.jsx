@@ -21,11 +21,12 @@ import { createPortal, flushSync } from 'react-dom';
  */
 const { H } = window.__DATA;
 // - ALT SCENARIO ("AltScen") -
-// Menu toggle (persisted; switching reloads the page). When on, the real data is
+// Site URL /alt (the menu button switches between / and /alt). When on, the real data is
 // swapped for the Alt Scenario datasets from ALT_START_MS (Apr 11 12:00 EDT) through
 // ALT_END_MS (Jun 30 23:00 EDT). Scenario files are on a US Eastern clock labelled as
 // UTC; the whole alt range is EDT, so their timestamps shift by +4h onto this app's UTC.
-const ALT_SCEN = (() => { try { return localStorage.getItem('pvt_altscen') === '1'; } catch { return false; } })();
+// On when the site is opened at /alt (the Alt Scenario button navigates between / and /alt).
+const ALT_SCEN = typeof window !== 'undefined' && /^\/alt(\/|$)/.test(window.location.pathname);
 // One-shot: the AltScen toggle sets this right before its reload, so that load keeps
 // the user's view, settings and position instead of applying the startup preset.
 const KEEP_STATE_ON_LOAD = (() => { try { const v = sessionStorage.getItem('pvt_keep_state') === '1'; sessionStorage.removeItem('pvt_keep_state'); return v; } catch { return false; } })();
@@ -7817,7 +7818,7 @@ export default function SocialBladeLive() {
           {/* DATA: Alt Scenario toggle (persisted; reloads to swap the datasets) */}
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DATA</span>
-            <button onClick={()=>{ try { _saveSS({ pos: posRef.current }); localStorage.setItem('pvt_altscen', ALT_SCEN ? '0' : '1'); sessionStorage.setItem('pvt_keep_state', '1'); } catch {} window.location.reload(); }}
+            <button onClick={()=>{ try { _saveSS({ pos: posRef.current }); sessionStorage.setItem('pvt_keep_state', '1'); } catch {} window.location.href = (ALT_SCEN ? '/' : '/alt') + window.location.search; }}
               title="Swaps data to the alternate 'Aleksander Effect' scenario starting Apr 11 12:00 EDT"
               style={{ background:ALT_SCEN?"#2a1a35":"transparent", color:ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN?600:400 }}>Alt Scenario</button>
           </div>
