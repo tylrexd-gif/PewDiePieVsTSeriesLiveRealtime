@@ -7678,6 +7678,10 @@ export default function SocialBladeLive() {
   const _tsCardScale  = 1.035 * _sbShrinkF;
   const _tsCardLeft   = 1009.3175 - 561 * _tsCardScale / 2;
   const _tsCardTop    = 126.27    - 244 * _tsCardScale / 2;
+  // Center column edges fixed at the unshrunk card edges, so the near-100M
+  // shrink only scales the cards and never widens the column over the charts.
+  const _sbColL       = 272       + 544 / 2;
+  const _sbColR       = 1009.3175 - 561 * 1.035 / 2;
 
   return (
     <div style={{ background:"#000", minHeight:"100vh", overflow:"hidden", fontFamily:"'Inter',system-ui,-apple-system,'Segoe UI',sans-serif" }}>
@@ -8028,7 +8032,7 @@ export default function SocialBladeLive() {
         </div>
 
         {/* = TS Sub Chart = */}
-        <div style={{ position:"absolute", left:_tsCardLeft, top:256, width:561, height:231, overflow:"hidden", background:`linear-gradient(to bottom, ${SB_CHART_BG} calc(100% - 80px), ${SB_AXIS_BG} calc(100% - 80px))` }}>
+        <div style={{ position:"absolute", left:_sbColR, top:256, width:561, height:231, overflow:"hidden", background:`linear-gradient(to bottom, ${SB_CHART_BG} calc(100% - 80px), ${SB_AXIS_BG} calc(100% - 80px))` }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={ts1hData} margin={{top:5,right:10,bottom:20,left:10}}>
               <XAxis dataKey="t" type="number" domain={[tMinTs1h, tsTime]} allowDataOverflow ticks={ticksTs1h} tickFormatter={fmt1hTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
@@ -8039,7 +8043,7 @@ export default function SocialBladeLive() {
         </div>
 
         {/* Center column backdrop - bounds computed from card edges so it doesn't clip into PDP/TS */}
-        {(()=>{ const cl=_pdpCardLeft+544*_pdpCardScale, cw=_tsCardLeft-cl; return (<>
+        {(()=>{ const cl=_sbColL, cw=_sbColR-cl; return (<>
           <div style={{ position:"absolute", left:cl, top:0, width:cw, height:480, background:SB_CENTER_BG, pointerEvents:"none" }}/>
           {!sbDark && <div style={{ position:"absolute", left:cl, top:381, width:cw, height:78, background:SB_CARD_BG, pointerEvents:"none" }}/>}
           {/* Race to 100M / Battle For #1 Most Subscribed - rendered after backdrop so it's on top */}
@@ -8090,8 +8094,8 @@ export default function SocialBladeLive() {
           counterValue: displaySB,
           bgWatermark: {x: 80, y: -53, w: 386, h: 266},
           bgWatermarkBelow: true,
-          bgExtendLeft: 580 - (_pdpCardLeft + 544*_pdpCardScale),
-          bgClipW: _tsCardLeft - 580,
+          bgExtendLeft: 580 - _sbColL,
+          bgClipW: _sbColR - 580,
         })}
 
         {/* = Sub Gap Text = */}
