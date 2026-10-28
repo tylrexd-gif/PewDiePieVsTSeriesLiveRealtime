@@ -5173,6 +5173,9 @@ const _gapCrossingsCache = new Map();
 // then just re-renders on the new data (_onAltSwapped): nothing is remounted, so
 // counters, charts, open panels and playback carry on.
 const _SMOOTH_FILE = 'every_second_counts_pvt.pvd.gz';
+
+// Dev mode is local-only: start.bat / npm run dev serve on localhost.
+const DEV_MODE_ALLOWED = typeof window !== 'undefined' && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname);
 let _onAltSwapped = null;
 let _altSwitchTarget = null;  // mode being switched to, while its buffer is built
 async function _setAltScen(on) {
@@ -5338,7 +5341,9 @@ export default function SocialBladeLive() {
   const [inspectorPinned, setInspectorPinned] = useState(false);
   const [inspectorPinnedTime, setInspectorPinnedTime] = useState(null);
   const [inspectorCount, setInspectorCount] = useState(60);
-  const [devMode, setDevMode] = useState(() => { try { return localStorage.getItem('pvt_devmode') === '1'; } catch { return false; } });
+  // Dev mode (Shift+H) exists only when the app is served locally - never on the online site,
+  // even if a saved 'pvt_devmode' flag is left over from before this check.
+  const [devMode, setDevMode] = useState(() => { if (!DEV_MODE_ALLOWED) return false; try { return localStorage.getItem('pvt_devmode') === '1'; } catch { return false; } });
   const [patchEditorOpen, setPatchEditorOpen] = useState(false);
   const [patches, setPatches] = useState(() => {
     const d = window.__DATA.MANUAL_PATCHES;
@@ -5933,7 +5938,7 @@ export default function SocialBladeLive() {
         return;
       }
       if (e.code === "Space") { e.preventDefault(); if (!musicArrowSeekRef.current) skipMusicSyncRef.current = true; dispatch({type:"TOGGLE_PLAY"}); return; }
-      if (e.shiftKey && e.key === "H") { setDevMode(v => { const n=!v; try{localStorage.setItem('pvt_devmode',n?'1':'0');}catch{} return n; }); return; }
+      if (e.shiftKey && e.key === "H") { if (!DEV_MODE_ALLOWED) return; setDevMode(v => { const n=!v; try{localStorage.setItem('pvt_devmode',n?'1':'0');}catch{} return n; }); return; }
       if (e.key === "h" || e.key === "H") { setBarHidden(v => !v); return; }
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       e.preventDefault();
