@@ -25,14 +25,20 @@ const { H } = window.__DATA;
 // swapped for the Alt Scenario datasets from ALT_START_MS (Apr 11 12:00 EDT) through
 // ALT_END_MS (Jun 30 23:00 EDT). Scenario files are on a US Eastern clock labelled as
 // UTC; the whole alt range is EDT, so their timestamps shift by +4h onto this app's UTC.
-// On when the site is opened at /alt (the Alt Scenario button navigates between / and /alt).
-const ALT_SCEN = typeof window !== 'undefined' && /^\/alt(\/|$)/.test(window.location.pathname);
-// One-shot: the AltScen toggle sets this right before its reload, so that load keeps
-// the user's view, settings and position instead of applying the startup preset.
+// On when the site is opened at /alt. The Alt Scenario button switches between / and /alt
+// in place (pushState, no page reload): _setAltScen swaps the data under the running app,
+// re-running every _onAltScen block below.
+let ALT_SCEN = typeof window !== 'undefined' && /^\/alt(\/|$)/.test(window.location.pathname);
+// One-shot: an older build's AltScen toggle set this right before its reload, so that load
+// keeps the user's view, settings and position instead of applying the startup preset.
 const KEEP_STATE_ON_LOAD = (() => { try { const v = sessionStorage.getItem('pvt_keep_state') === '1'; sessionStorage.removeItem('pvt_keep_state'); return v; } catch { return false; } })();
 const ALT_START_MS = Date.UTC(2019, 3, 11, 16, 0, 0);   // Apr 11 12:00 EDT
 const ALT_END_MS   = Date.UTC(2019, 6, 1, 3, 0, 0);     // Jun 30 23:00 EDT
 const ALT_TZ_SHIFT_MS = 4 * 3600000;
+// Module-level data that depends on ALT_SCEN is built in _onAltScen blocks: each runs
+// once at load (in file order) and again, in the same order, whenever ALT_SCEN flips.
+const _altScenBlocks = [];
+const _onAltScen = (fn) => { fn(); _altScenBlocks.push(fn); };
 const _arr = (k) => Array.isArray(window.__DATA[k]) ? window.__DATA[k] : [];
 // SocialBlade / FlareTV channel daily counts ([labelMs, value]; each value is the
 // labelled day's 23:00 ET snapshot). AltScen: real snapshots up to the last one before
@@ -50,25 +56,28 @@ const _spliceDailyAlt = (real, alt) => {
 };
 // Flare news / promotions: AltScen keeps real entries before ALT_START_MS, then only
 // the Alt Scenario exclusive lists (real later events would contradict the scenario).
-const FLARE_NEWS_ENTRIES = ALT_SCEN ? [..._REAL_NEWS.filter(e => e.ms < ALT_START_MS), ...ALT_NEWS_ENTRIES] : _REAL_NEWS;
-const FLARE_PROMOTIONS   = ALT_SCEN ? [..._REAL_PROMOS.filter(e => e.ms < ALT_START_MS), ...ALT_PROMOTIONS] : _REAL_PROMOS;
-const SBD_REAL  = _spliceDailyAlt(_arr('SBD_REAL'),  _arr('SB_ALT'));
-const FTVD_REAL = _spliceDailyAlt(_arr('FTVD_REAL'), _arr('FTV_ALT'));
-// Real Data audit events: [{ms, channel, type, magnitude}], sorted chronologically.
-// AltScen: real audits before ALT_START_MS, then the Scenario export's audits.
-const REAL_AUDITS = ALT_SCEN
-  ? [
-      ..._arr('REAL_AUDITS').filter(a => a.ms < ALT_START_MS),
-      // Scenario audit times carry milliseconds; its per-second export only includes an
-      // audit from the first whole second at/after it, so round up to that second -
-      // otherwise Filter Audits strips the jump one second before it appears.
-      ..._arr('ALT_AUDITS').map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta, minute_total: a.delta }))
-        .filter(a => a.ms >= ALT_START_MS),
-    ].sort((x, y) => x.ms - y.ms)
-  : _arr('REAL_AUDITS');
-// Only major events (type === 'audit') are used for chart markers, gain stripping, and the
-// Audit Time table. Minor events are detected but excluded from all UI.
-const REAL_AUDITS_MAJOR = REAL_AUDITS.filter(a => a.type === 'audit');
+let FLARE_NEWS_ENTRIES, FLARE_PROMOTIONS, SBD_REAL, FTVD_REAL, REAL_AUDITS, REAL_AUDITS_MAJOR;
+_onAltScen(() => {
+  FLARE_NEWS_ENTRIES = ALT_SCEN ? [..._REAL_NEWS.filter(e => e.ms < ALT_START_MS), ...ALT_NEWS_ENTRIES] : _REAL_NEWS;
+  FLARE_PROMOTIONS   = ALT_SCEN ? [..._REAL_PROMOS.filter(e => e.ms < ALT_START_MS), ...ALT_PROMOTIONS] : _REAL_PROMOS;
+  SBD_REAL  = _spliceDailyAlt(_arr('SBD_REAL'),  _arr('SB_ALT'));
+  FTVD_REAL = _spliceDailyAlt(_arr('FTVD_REAL'), _arr('FTV_ALT'));
+  // Real Data audit events: [{ms, channel, type, magnitude}], sorted chronologically.
+  // AltScen: real audits before ALT_START_MS, then the Scenario export's audits.
+  REAL_AUDITS = ALT_SCEN
+    ? [
+        ..._arr('REAL_AUDITS').filter(a => a.ms < ALT_START_MS),
+        // Scenario audit times carry milliseconds; its per-second export only includes an
+        // audit from the first whole second at/after it, so round up to that second -
+        // otherwise Filter Audits strips the jump one second before it appears.
+        ..._arr('ALT_AUDITS').map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta, minute_total: a.delta }))
+          .filter(a => a.ms >= ALT_START_MS),
+      ].sort((x, y) => x.ms - y.ms)
+    : _arr('REAL_AUDITS');
+  // Only major events (type === 'audit') are used for chart markers, gain stripping, and the
+  // Audit Time table. Minor events are detected but excluded from all UI.
+  REAL_AUDITS_MAJOR = REAL_AUDITS.filter(a => a.type === 'audit');
+});
 
 import pdpIcon from './assets/pdpIcon.jpg';
 import tsIcon from './assets/tsIcon.jpg';
@@ -276,11 +285,14 @@ const _fmtAuditDisplayTime = (ts) => {
 
 // Per-channel slices of REAL_AUDITS_MAJOR with prefix sums for O(log n) cumulative magnitude lookup.
 // REAL_AUDITS is chronologically sorted (detect-audits.js guarantees this).
-const _rdAuditPdp = REAL_AUDITS_MAJOR.filter(a => a.channel === 'pdp');
-const _rdAuditTs  = REAL_AUDITS_MAJOR.filter(a => a.channel === 'ts');
 const _rdMkPfx = (arr) => arr.reduce((acc, a) => { acc.push((acc.length ? acc[acc.length - 1] : 0) + a.magnitude); return acc; }, []);
-const _rdAuditPdpPfx = _rdMkPfx(_rdAuditPdp);
-const _rdAuditTsPfx  = _rdMkPfx(_rdAuditTs);
+let _rdAuditPdp, _rdAuditTs, _rdAuditPdpPfx, _rdAuditTsPfx;
+_onAltScen(() => {
+  _rdAuditPdp = REAL_AUDITS_MAJOR.filter(a => a.channel === 'pdp');
+  _rdAuditTs  = REAL_AUDITS_MAJOR.filter(a => a.channel === 'ts');
+  _rdAuditPdpPfx = _rdMkPfx(_rdAuditPdp);
+  _rdAuditTsPfx  = _rdMkPfx(_rdAuditTs);
+});
 // Returns cumulative audit magnitude for channel ch at all events with ms <= t.
 const getRdCumAudit = (t, ch) => {
   const arr = ch === 'pdp' ? _rdAuditPdp : _rdAuditTs;
@@ -646,6 +658,11 @@ let BOTH_100M_TS = (() => {
   for (let i = 0; i < RAW.length; i++) if (RAW[i].pt >= 100000000 && RAW[i].tt >= 100000000) return RAW[i].t;
   return Infinity;
 })();
+// Leaving AltScen restores the RAW-based values (an Alt data load recomputes them).
+const _SWITCH_TIMES_RAW = { TS_LEAD_TS, TS_SLOWDOWN_TS, PDP_100M_TS, TS_100M_TS, BOTH_100M_TS };
+_onAltScen(() => {
+  ({ TS_LEAD_TS, TS_SLOWDOWN_TS, PDP_100M_TS, TS_100M_TS, BOTH_100M_TS } = _SWITCH_TIMES_RAW);
+});
 
 // AltScen: RAW is empty in real mode, so recompute the switch times above with the
 // same rules from on-the-hour samples of the per-second data, once it has loaded.
@@ -690,10 +707,14 @@ const DAY_MS = 24 * HOUR_MS;
 const REAL_DATA_START_MS = Date.UTC(2018, 9, 17, 4, 0, 0); // 2018-10-17 00:00:00 EDT (UTC-4)
 // With AltScen on, the per-second buffer is real data up to ALT_START_MS, then the
 // Scenario export (scenario-pdp-ts.bin) through ALT_END_MS, and the timeline extends to match.
-const REAL_DATA_PAIR_COUNT = ALT_SCEN
-  ? (ALT_END_MS - REAL_DATA_START_MS) / 1000 + 1
-  : 16934401; // total seconds in the real binary (indices 0..16934400)
-const REAL_DATA_END_MS = REAL_DATA_START_MS + (REAL_DATA_PAIR_COUNT - 1) * 1000; // real: 2019-05-01 00:00 EDT
+const ALT_PAIR_COUNT = (ALT_END_MS - REAL_DATA_START_MS) / 1000 + 1;
+let REAL_DATA_PAIR_COUNT, REAL_DATA_END_MS;
+_onAltScen(() => {
+  REAL_DATA_PAIR_COUNT = ALT_SCEN
+    ? ALT_PAIR_COUNT
+    : 16934401; // total seconds in the real binary (indices 0..16934400)
+  REAL_DATA_END_MS = REAL_DATA_START_MS + (REAL_DATA_PAIR_COUNT - 1) * 1000; // real: 2019-05-01 00:00 EDT
+});
 
 // Patch editor helpers (module-level, no React deps)
 // Accepts: raw ms number, "idx:NNNNN" binary index, "YYYY-MM-DD HH:MM:SS [UTC]", or ISO string.
@@ -714,7 +735,10 @@ function _fmtPatchMs(ms) {
 // At dataset start he had been ahead for 1887d 23h 49m 0s, so the implied
 // lead-start timestamp is this many ms before REAL_DATA_START_MS.
 const PDP_LEAD_SINCE = REAL_DATA_START_MS - (1887 * 86400 + 23 * 3600 + 49 * 60) * 1000;
-const REAL_DATA_HOURS = Math.round((REAL_DATA_END_MS - REAL_DATA_START_MS) / HOUR_MS); // real: 4704 (196 days) - playhead range in hour units
+let REAL_DATA_HOURS;
+_onAltScen(() => {
+  REAL_DATA_HOURS = Math.round((REAL_DATA_END_MS - REAL_DATA_START_MS) / HOUR_MS); // real: 4704 (196 days) - playhead range in hour units
+});
 
 let _realDataBuf = null;      // Uint32Array once loaded
 let _realDataLoading = false;
@@ -756,31 +780,39 @@ async function _fetchWithProgress(url) {
 // timestamps are shifted by ALT_TZ_SHIFT_MS. Falls back to the real data on any mismatch.
 // Per-second series files: packed PVD1 (.pvd.gz, see app/scripts/pack-bin.mjs) for
 // the deployed data; plain u32le pairs (.bin) for the dev-only raw file.
+// The packed files' downloaded bytes are kept (~15 MB + 6 MB), so switching Alt Scenario
+// on/off only re-decodes them instead of downloading again.
+const _packedBytes = new Map();
+async function _fetchPacked(url) {
+  if (!_packedBytes.has(url)) _packedBytes.set(url, await _fetchWithProgress(url));
+  return _packedBytes.get(url).slice(0);   // decoders may detach / reuse the buffer
+}
+
 async function _fetchRealSeries(file) {
-  const ab = await _fetchWithProgress('/data/' + file);
-  if (!file.endsWith('.pvd.gz')) return new Uint32Array(ab);
-  return unpackPVD(await gunzipIfNeeded(ab), Uint32Array).data;
+  if (!file.endsWith('.pvd.gz')) return new Uint32Array(await _fetchWithProgress('/data/' + file));
+  return unpackPVD(await gunzipIfNeeded(await _fetchPacked('/data/' + file)), Uint32Array).data;
 }
 
 async function _loadMergedAlt(file) {
   const real = await _fetchRealSeries(file);
   let altPk;
-  try { altPk = unpackPVD(await gunzipIfNeeded(await _fetchWithProgress('/data/scenario-pdp-ts.pvd.gz')), Int32Array); }
+  try { altPk = unpackPVD(await gunzipIfNeeded(await _fetchPacked('/data/scenario-pdp-ts.pvd.gz')), Int32Array); }
   catch { return real; }
   const altStart = altPk.startMs + ALT_TZ_SHIFT_MS;
   const { stepMs: step, n, nCh } = altPk;
   if (step !== 1000 || nCh < 2) return real;
   const alt = altPk.data;
-  const out = new Uint32Array(REAL_DATA_PAIR_COUNT * 2);
+  // ALT_PAIR_COUNT, not REAL_DATA_PAIR_COUNT: an Alt switch builds this before flipping ALT_SCEN.
+  const out = new Uint32Array(ALT_PAIR_COUNT * 2);
   const sw = Math.round((altStart - REAL_DATA_START_MS) / 1000);   // first pair taken from the export
   out.set(real.subarray(0, Math.min(sw * 2, real.length)));
   let last = sw - 1;
-  for (let i = 0; i < n && sw + i < REAL_DATA_PAIR_COUNT; i++) {
+  for (let i = 0; i < n && sw + i < ALT_PAIR_COUNT; i++) {
     out[(sw + i) * 2] = alt[i * nCh];
     out[(sw + i) * 2 + 1] = alt[i * nCh + 1];
     last = sw + i;
   }
-  for (let j = last + 1; j < REAL_DATA_PAIR_COUNT; j++) { out[j * 2] = out[last * 2]; out[j * 2 + 1] = out[last * 2 + 1]; }
+  for (let j = last + 1; j < ALT_PAIR_COUNT; j++) { out[j * 2] = out[last * 2]; out[j * 2 + 1] = out[last * 2 + 1]; }
   return out;
 }
 
@@ -829,21 +861,35 @@ function _computeAltVoteSchedule(buf) {
   return out;
 }
 
+// Bumped by every (re)load, so a load still in flight when the file or Alt Scenario
+// changes can't install its now-stale buffer.
+let _realDataGen = 0;
+let _realDataFile = null;     // file the installed _realDataBuf came from
+let _realDataVersion = 0;     // bumped per installed buffer; the app's realDataReady holds it
+const _fetchSeriesFor = (file, alt) => alt ? _loadMergedAlt(file) : _fetchRealSeries(file);
+// Installs a loaded buffer (for the current ALT_SCEN) with everything computed from it.
+function _installRealData(buf, file) {
+  _realDataBuf = buf;
+  _realDataFile = file;
+  _realDataVersion++;
+  _gapCrossings = _computeGapCrossings(buf);
+  _altVoteSchedule = null;
+  if (ALT_SCEN) {
+    _altVoteSchedule = _computeAltVoteSchedule(buf);
+    _recomputeSwitchTimesFromBuf(buf);
+  }
+}
 function _loadRealData(onDone, file = 'every_second_counts_pvt.pvd.gz') {
   if (_realDataLoading) return;
   _realDataLoading = true;
-  const load = ALT_SCEN ? _loadMergedAlt(file) : _fetchRealSeries(file);
-  load
+  const gen = ++_realDataGen;
+  _fetchSeriesFor(file, ALT_SCEN)
     .then(buf => {
-      _realDataBuf = buf;
-      _gapCrossings = _computeGapCrossings(buf);
-      if (ALT_SCEN) {
-        _altVoteSchedule = _computeAltVoteSchedule(buf);
-        _recomputeSwitchTimesFromBuf(buf);
-      }
+      if (gen !== _realDataGen) return;
+      _installRealData(buf, file);
       _realDataLoading = false; if (onDone) onDone();
     })
-    .catch(() => { _realDataLoading = false; if (onDone) onDone(); });
+    .catch(() => { if (gen !== _realDataGen) return; _realDataLoading = false; if (onDone) onDone(); });
 }
 
 function _reloadRealData(file, onDone) {
@@ -1322,8 +1368,7 @@ const _wrapDailyRealForNoise = (arr) => arr.map(a => {
   const isEST = tentative >= _DST_FALL_BACK_2018 && tentative < _DST_SPRING_FWD_2019;
   return { t: a[0] + (isEST ? 28 : 27) * HOUR_MS, v: a[1] };
 });
-const SBD_REAL_RAW  = _wrapDailyRealForNoise(SBD_REAL);
-const FTVD_REAL_RAW = _wrapDailyRealForNoise(FTVD_REAL);
+let SBD_REAL_RAW, FTVD_REAL_RAW;   // built (with MUSIC_RAW / SLOWLY_RAW) in the _onAltScen block below
 
 // - DERIVED-FIELDS POST-PASS -
 // Every non-stored field on every channel's RAW row is computed here,
@@ -1375,20 +1420,25 @@ const _deriveDailyChannel = (arr) => {
     r.vw  = i >= 7 ? r.v - arr[i-7].v : null;      // 7-day delta.
   }
 };
-_deriveDailyChannel(SBD_REAL_RAW);
-_deriveDailyChannel(FTVD_REAL_RAW);
+let MUSIC_RAW, SLOWLY_RAW;
+_onAltScen(() => {
+  SBD_REAL_RAW  = _wrapDailyRealForNoise(SBD_REAL);
+  FTVD_REAL_RAW = _wrapDailyRealForNoise(FTVD_REAL);
+  _deriveDailyChannel(SBD_REAL_RAW);
+  _deriveDailyChannel(FTVD_REAL_RAW);
 
-// AltScen-only channels. YT Music: daily, same 23:00 ET snapshot convention as SB/FTV.
-// Slowly Slowly views: hourly, on Scenario's clock (+ALT_TZ_SHIFT_MS onto UTC).
-const MUSIC_RAW  = ALT_SCEN ? _wrapDailyRealForNoise(_arr('YT_MUSIC_D')) : [];
-const SLOWLY_RAW = ALT_SCEN ? _arr('SLOWLY_H').map(([t, v]) => ({ t: t + ALT_TZ_SHIFT_MS, v })) : [];
-_deriveDailyChannel(MUSIC_RAW);
-for (let i = 0; i < SLOWLY_RAW.length; i++) {
-  const r = SLOWLY_RAW[i];
-  r.opt = r.v;                                          // no audits
-  r.vh  = i >= 1  ? r.v - SLOWLY_RAW[i - 1].v  : null;
-  r.vd  = i >= 24 ? r.v - SLOWLY_RAW[i - 24].v : null;
-}
+  // AltScen-only channels. YT Music: daily, same 23:00 ET snapshot convention as SB/FTV.
+  // Slowly Slowly views: hourly, on Scenario's clock (+ALT_TZ_SHIFT_MS onto UTC).
+  MUSIC_RAW  = ALT_SCEN ? _wrapDailyRealForNoise(_arr('YT_MUSIC_D')) : [];
+  SLOWLY_RAW = ALT_SCEN ? _arr('SLOWLY_H').map(([t, v]) => ({ t: t + ALT_TZ_SHIFT_MS, v })) : [];
+  _deriveDailyChannel(MUSIC_RAW);
+  for (let i = 0; i < SLOWLY_RAW.length; i++) {
+    const r = SLOWLY_RAW[i];
+    r.opt = r.v;                                          // no audits
+    r.vh  = i >= 1  ? r.v - SLOWLY_RAW[i - 1].v  : null;
+    r.vd  = i >= 24 ? r.v - SLOWLY_RAW[i - 24].v : null;
+  }
+});
 
 // Precomputed per-knot tangent arrays - one entry per RAW row per key.
 // Built once here; consumed by interpolate(), getOrganicAt(), etc.
@@ -1403,10 +1453,6 @@ const RAW_T = Object.fromEntries(
 const CHANNEL_OPT_T = {
   pdp:      RAW_T.opt,
   ts:       RAW_T.ott,
-  sb_real:  _buildTangents(SBD_REAL_RAW,  'opt', true),
-  ftv_real: _buildTangents(FTVD_REAL_RAW, 'opt', true),
-  music:    _buildTangents(MUSIC_RAW,     'opt', true),
-  slowly:   _buildTangents(SLOWLY_RAW,    'opt', true),
 };
 
 // Dispatcher: channel key -> its RAW array + the property holding
@@ -1416,11 +1462,14 @@ const CHANNEL_OPT_T = {
 const CHANNEL_SOURCE = {
   pdp:      { raw: RAW,            field: "opt" },
   ts:       { raw: RAW,            field: "ott" },
-  sb_real:  { raw: SBD_REAL_RAW,  field: "opt" },
-  ftv_real: { raw: FTVD_REAL_RAW, field: "opt" },
-  music:    { raw: MUSIC_RAW,     field: "opt" },
-  slowly:   { raw: SLOWLY_RAW,    field: "opt" },
 };
+// The daily / Alt-only channels' entries in both tables follow ALT_SCEN.
+_onAltScen(() => {
+  for (const [ch, raw] of [['sb_real', SBD_REAL_RAW], ['ftv_real', FTVD_REAL_RAW], ['music', MUSIC_RAW], ['slowly', SLOWLY_RAW]]) {
+    CHANNEL_OPT_T[ch]  = _buildTangents(raw, 'opt', true);
+    CHANNEL_SOURCE[ch] = { raw, field: "opt" };
+  }
+});
 
 
 // Interpolated organic value for any channel at timestamp t. Monotonic Hermite
@@ -4317,7 +4366,8 @@ const _expPyramid = (kind, lbSec, strip, perMin) => {
 };
 
 const EXP_MIN_SPAN = 30 * 1000;
-const EXP_MAX_SPAN = REAL_DATA_END_MS - REAL_DATA_START_MS;
+let EXP_MAX_SPAN;
+_onAltScen(() => { EXP_MAX_SPAN = REAL_DATA_END_MS - REAL_DATA_START_MS; });
 const EXP_PAD = { l: 84, r: 20, t: 14, b: 30 };
 const EXP_X_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 1209600, 2592000];
 const EXP_PRESETS = [["10m", 600], ["1h", 3600], ["6h", 21600], ["1d", 86400], ["7d", 604800], ["30d", 2592000]];
@@ -5116,10 +5166,49 @@ const SpectrumAnalyzer = React.memo(({ playing = true, mult = 1, live = false, a
 // Survives view switches so re-entering dashboard is instant.
 const _gapCrossingsCache = new Map();
 
+// - ALT SCENARIO SWITCH (no page reload) -
+// Builds the other mode's per-second buffer while the current one keeps playing, then in
+// one step flips ALT_SCEN, rebuilds the Alt-dependent module data (_onAltScen blocks),
+// drops caches built from the old data and installs the new buffer. The running app
+// then just re-renders on the new data (_onAltSwapped): nothing is remounted, so
+// counters, charts, open panels and playback carry on.
+const _SMOOTH_FILE = 'every_second_counts_pvt.pvd.gz';
+let _onAltSwapped = null;
+let _altSwitchTarget = null;  // mode being switched to, while its buffer is built
+async function _setAltScen(on) {
+  if (_altSwitchTarget !== null) { _altSwitchTarget = on; return; }   // the running switch picks up the latest target
+  if (on === ALT_SCEN) return;
+  _altSwitchTarget = on;
+  const file = _realDataFile ?? _SMOOTH_FILE;   // keeps Raw mode if it is on
+  let target = on, buf = null;
+  for (;;) {
+    try { buf = await _fetchSeriesFor(file, target); } catch { buf = null; }
+    if (_altSwitchTarget === target) break;
+    target = _altSwitchTarget;   // toggled again meanwhile
+    if (target === ALT_SCEN) { _altSwitchTarget = null; _onAltSwapped?.(); return; }
+  }
+  _altSwitchTarget = null;
+  if (!buf) { window.history.replaceState(null, '', _altPathOf(ALT_SCEN)); _onAltSwapped?.(); return; }   // load failed: stay put
+  ALT_SCEN = target;
+  for (const fn of _altScenBlocks) fn();
+  _CHAN_NOISE_CACHE.clear();
+  _gapCrossingsCache.clear();
+  ++_realDataGen;               // a load still in flight is now stale
+  _realDataLoading = false;
+  _installRealData(buf, file);
+  _onAltSwapped?.();
+}
+const _altPathOf = (on) => {
+  const rest = window.location.pathname.replace(/^\/alt(?=\/|$)/, '') || '/';
+  return (on ? '/alt' + (rest === '/' ? '' : rest) : rest) + window.location.search + window.location.hash;
+};
+
 // - MAIN COMPONENT -
 export default function SocialBladeLive() {
   const appMode = 'real'; // alt-scenario mode removed
-  const [realDataReady, setRealDataReady] = useState(false);
+  // 0 until the per-second data has loaded, then the installed buffer's version - so
+  // memos keyed on it also rebuild when an Alt Scenario switch swaps the data.
+  const [realDataReady, setRealDataReady] = useState(0);
   const [rawMode, setRawMode] = useState(false);
   const [dashRawDelta, setDashRawDelta] = useState(false);
   const [dashGain5min, setDashGain5min] = useState(false);
@@ -5386,13 +5475,31 @@ export default function SocialBladeLive() {
   useEffect(() => {
     const file = rawMode
       ? 'every_second_counts_pvt_u32le.raw.bin'   // dev-only, local plain binary
-      : 'every_second_counts_pvt.pvd.gz';
-    setRealDataReady(false);
+      : _SMOOTH_FILE;
+    setRealDataReady(0);
     _reloadRealData(file, () => {
-      setRealDataReady(!!_realDataBuf);
+      setRealDataReady(_realDataBuf ? _realDataVersion : 0);
       if (!_realDataBuf) window._dismissLoading?.(); // don't hang on the loading screen if the fetch failed
     });
   }, [rawMode]);
+
+  // Alt Scenario switch: the data was swapped in place (see _setAltScen) - re-render on it,
+  // keeping everything else. Only the playhead moves, and only if the new timeline ends
+  // before it (leaving Alt past May 1). Browser back/forward between / and /alt switches too.
+  const [altSwitching, setAltSwitching] = useState(false);   // the other mode's data is being built
+  useEffect(() => {
+    _onAltSwapped = () => {
+      setRealDataReady(_realDataBuf ? _realDataVersion : 0);
+      if (posRef.current > REAL_DATA_HOURS) {
+        posRef.current = REAL_DATA_HOURS; setPos(REAL_DATA_HOURS);
+        dispatch({type:"BUMP_SEEK"});
+      }
+      setAltSwitching(false);
+    };
+    const onPop = () => { const on = /^\/alt(\/|$)/.test(window.location.pathname); if (on !== (_altSwitchTarget ?? ALT_SCEN)) { setAltSwitching(true); _setAltScen(on); } };
+    window.addEventListener('popstate', onPop);
+    return () => { _onAltSwapped = null; window.removeEventListener('popstate', onPop); };
+  }, []);
 
   // Load raw alt buffer on demand for delta chart.
   useEffect(() => {
@@ -5444,8 +5551,8 @@ export default function SocialBladeLive() {
       setHistStartIdx(HIST_V2_RESET_IDX);
     }
   }, [curTime, histStartIdx]);
-  const curSB  = useMemo(() => Math.round(getChannelOrganicAt(curTime, 'sb_real')  ?? 0), [curTime]);
-  const curFTV = useMemo(() => Math.round(getChannelOrganicAt(curTime, 'ftv_real') ?? 0), [curTime]);
+  const curSB  = useMemo(() => Math.round(getChannelOrganicAt(curTime, 'sb_real')  ?? 0), [curTime, realDataReady]);
+  const curFTV = useMemo(() => Math.round(getChannelOrganicAt(curTime, 'ftv_real') ?? 0), [curTime, realDataReady]);
 
   // 1-second clock for timezone display.
   const [, setClockBump] = useState(0);
@@ -5527,7 +5634,7 @@ export default function SocialBladeLive() {
       if (v != null) pts.push({ t, mt: v });
     }
     return pts;
-  }, [tMinMusic1h, curTime, useNoise, rtPeriodSec]);
+  }, [tMinMusic1h, curTime, useNoise, rtPeriodSec, realDataReady]);
 
   const gap1hData = useMemo(() => {
     const pts = [];
@@ -5810,7 +5917,7 @@ export default function SocialBladeLive() {
       if (pdp && ts) break;
     }
     return { pdp, ts };
-  }, [tableTime, appMode, dispTz]);
+  }, [tableTime, appMode, dispTz, realDataReady]);
 
   const musicArrowSeekRef = useRef(true);
   const skipMusicSyncRef = useRef(false);
@@ -7822,9 +7929,9 @@ export default function SocialBladeLive() {
           {/* DATA: Alt Scenario toggle (persisted; reloads to swap the datasets) */}
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DATA</span>
-            <button onClick={()=>{ try { _saveSS({ pos: posRef.current }); sessionStorage.setItem('pvt_keep_state', '1'); } catch {} window.location.href = (ALT_SCEN ? '/' : '/alt') + window.location.search; }}
+            <button onClick={()=>{ const on = !(_altSwitchTarget ?? ALT_SCEN); window.history.pushState(null, '', _altPathOf(on)); setAltSwitching(true); _setAltScen(on); }}
               title="Swaps data to the alternate 'Aleksander Effect' scenario starting Apr 11 12:00 EDT"
-              style={{ background:ALT_SCEN?"#2a1a35":"transparent", color:ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN?600:400 }}>Alt Scenario</button>
+              style={{ background:ALT_SCEN?"#2a1a35":"transparent", color:ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN?600:400, opacity:altSwitching?0.6:1 }}>{altSwitching ? "Switching…" : "Alt Scenario"}</button>
           </div>
 
           {/* OPTIONS (view-specific) */}
