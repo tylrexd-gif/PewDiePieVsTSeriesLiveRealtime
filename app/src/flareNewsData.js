@@ -83,6 +83,8 @@ export const FLARE_NEWS_ENTRIES = [
   { ms: Date.UTC(2019, 3, 14, 11, 0, 0), label: "", text: "T-Series's subscriber growth greatly increased on Apr 14 due to a collaboration with Pepsi being displayed on the front page of YouTube in India", windowHours: 48 },
   { ms: Date.UTC(2019, 3, 26, 20, 0, 0), label: "", text: "Apr 26 - T-Series leads PewDiePie by 1,000,000 subscribers", windowHours: 600 },
   { ms: Date.UTC(2019, 3, 28, 20, 0, 0), label: "", text: "Apr 28 - PewDiePie announces the end of the 'Subscribe to Pewdiepie' meme", windowHours: 600 },
+  { ms: Date.UTC(2019, 3, 29, 16, 0, 0), label: "", text: "Apr 29 - 'International PewDiePie Day' is celebrated", windowHours: 48 },   // Apr 29 12:00 EDT
+  { ms: Date.UTC(2019, 4, 29, 10, 0, 0), label: "", text: "May 29 - T-Series reaches 100M subscribers", windowHours: 6000 },   // May 29 06:00 EDT
 ];
 
 // Promotion summaries are hidden before this date regardless of entries.
@@ -91,7 +93,8 @@ export const PROMO_DISPLAY_START_MS = Date.UTC(2018, 10, 1, 0, 0, 0); // Nov 1 2
 // Channel promotion events.
 // channel: 'pdp' = PewDiePie, 'ts' = T-Series
 // If T-Series has no promotions in the last 2 days the block is hidden entirely.
-// If PewDiePie has none it says "PewDiePie has received no promotions lately".
+// If PewDiePie has none it says "PewDiePie has received no promotions lately" - unless
+// neither channel has had a promotion in the last 7 days, then nothing is shown.
 export const FLARE_PROMOTIONS = [
   // ── PewDiePie ──────────────────────────────────────────────────────────────
   { ms: Date.UTC(2018,  9, 26, 21,  0, 0), channel: 'pdp', by: 'MrBeast' },          // Oct 26  5PM EDT

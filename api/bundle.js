@@ -65,6 +65,11 @@ function buildDataBundle() {
       try { return parseSimpleSheet(read('FTV Daily Real.csv')); }
       catch (e) { return []; }
     })(),
+    // Real-data extension audits (May 1 - Jun 30), same CSV format as the Scenario export's.
+    EXT_AUDITS: (() => {
+      try { return parseAltAudits(read('real-pdp-ts-audits.csv')); }
+      catch (e) { return []; }
+    })(),
     // Alt Scenario datasets (used only when the AltScen flag is on).
     ALT_AUDITS: (() => {
       try { return parseAltAudits(read('scenario-pdp-ts-audits.csv')); }

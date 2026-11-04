@@ -28,13 +28,20 @@ const { H } = window.__DATA;
 // On when the site is opened at /alt. The Alt Scenario button switches between / and /alt
 // in place (pushState, no page reload): _setAltScen swaps the data under the running app,
 // re-running every _onAltScen block below.
-let ALT_SCEN = typeof window !== 'undefined' && /^\/alt(\/|$)/.test(window.location.pathname);
-// One-shot: an older build's AltScen toggle set this right before its reload, so that load
-// keeps the user's view, settings and position instead of applying the startup preset.
-const KEEP_STATE_ON_LOAD = (() => { try { const v = sessionStorage.getItem('pvt_keep_state') === '1'; sessionStorage.removeItem('pvt_keep_state'); return v; } catch { return false; } })();
+// URL flags: /alt and /live combine in either order (/live/alt, /alt/live).
+const _urlHas = (seg) => typeof window !== 'undefined' && window.location.pathname.split('/').includes(seg);
+const _urlFor = (alt, live) => ((live ? '/live' : '') + (alt ? '/alt' : '') || '/') + window.location.search + window.location.hash;
+let ALT_SCEN = _urlHas('alt');
 const ALT_START_MS = Date.UTC(2019, 3, 11, 16, 0, 0);   // Apr 11 12:00 EDT
 const ALT_END_MS   = Date.UTC(2019, 6, 1, 3, 0, 0);     // Jun 30 23:00 EDT
 const ALT_TZ_SHIFT_MS = 4 * 3600000;
+// Real-data extension (real-pdp-ts.bin + real-pdp-ts-audits.csv): continues the real data
+// from its end (May 1 00:00 EDT) through Jun 30 23:00 EDT. Same NPT1 export format and
+// Eastern-labelled-as-UTC clock as the Scenario export. Used whenever AltScen is off.
+const EXT_START_MS = Date.UTC(2019, 4, 1, 4, 0, 0);    // May 1 00:00 EDT (= end of the real binary)
+const EXT_END_MS   = ALT_END_MS;                       // Jun 30 23:00 EDT
+const EXT_FILE     = 'real-pdp-ts.pvd.gz';
+const ALT_FILE     = 'scenario-pdp-ts.pvd.gz';
 // Module-level data that depends on ALT_SCEN is built in _onAltScen blocks: each runs
 // once at load (in file order) and again, in the same order, whenever ALT_SCEN flips.
 const _altScenBlocks = [];
@@ -64,16 +71,16 @@ _onAltScen(() => {
   FTVD_REAL = _spliceDailyAlt(_arr('FTVD_REAL'), _arr('FTV_ALT'));
   // Real Data audit events: [{ms, channel, type, magnitude}], sorted chronologically.
   // AltScen: real audits before ALT_START_MS, then the Scenario export's audits.
+  // Otherwise: real audits, then the extension export's audits (from EXT_START_MS).
+  // Export audit times carry milliseconds; a per-second export only includes an audit
+  // from the first whole second at/after it, so round up to that second - otherwise
+  // Filter Audits strips the jump one second before it appears.
+  const fromExport = (key, from) => _arr(key)
+    .map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta, minute_total: a.delta }))
+    .filter(a => a.ms >= from);
   REAL_AUDITS = ALT_SCEN
-    ? [
-        ..._arr('REAL_AUDITS').filter(a => a.ms < ALT_START_MS),
-        // Scenario audit times carry milliseconds; its per-second export only includes an
-        // audit from the first whole second at/after it, so round up to that second -
-        // otherwise Filter Audits strips the jump one second before it appears.
-        ..._arr('ALT_AUDITS').map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta, minute_total: a.delta }))
-          .filter(a => a.ms >= ALT_START_MS),
-      ].sort((x, y) => x.ms - y.ms)
-    : _arr('REAL_AUDITS');
+    ? [..._arr('REAL_AUDITS').filter(a => a.ms < ALT_START_MS), ...fromExport('ALT_AUDITS', ALT_START_MS)].sort((x, y) => x.ms - y.ms)
+    : [..._arr('REAL_AUDITS').filter(a => a.ms < EXT_START_MS), ...fromExport('EXT_AUDITS', EXT_START_MS)].sort((x, y) => x.ms - y.ms);
   // Only major events (type === 'audit') are used for chart markers, gain stripping, and the
   // Audit Time table. Minor events are detected but excluded from all UI.
   REAL_AUDITS_MAJOR = REAL_AUDITS.filter(a => a.type === 'audit');
@@ -293,15 +300,35 @@ _onAltScen(() => {
   _rdAuditPdpPfx = _rdMkPfx(_rdAuditPdp);
   _rdAuditTsPfx  = _rdMkPfx(_rdAuditTs);
 });
-// Returns cumulative audit magnitude for channel ch at all events with ms <= t.
-const getRdCumAudit = (t, ch) => {
-  const arr = ch === 'pdp' ? _rdAuditPdp : _rdAuditTs;
-  const pfx = ch === 'pdp' ? _rdAuditPdpPfx : _rdAuditTsPfx;
+// Cumulative magnitude of the events in arr (sorted, prefix sums pfx) with ms <= t.
+const _cumAuditIn = (arr, pfx, t) => {
   if (!arr.length) return 0;
   let lo = 0, hi = arr.length - 1, res = -1;
   while (lo <= hi) { const mid = (lo + hi) >> 1; if (arr[mid].ms <= t) { res = mid; lo = mid + 1; } else hi = mid - 1; }
   return res < 0 ? 0 : pfx[res];
 };
+// Returns cumulative audit magnitude for channel ch at all events with ms <= t.
+const getRdCumAudit = (t, ch) => ch === 'pdp' ? _cumAuditIn(_rdAuditPdp, _rdAuditPdpPfx, t) : _cumAuditIn(_rdAuditTs, _rdAuditTsPfx, t);
+// Excess vs OTL (Alt Scenario only): the audits of the excess series (Alt minus OTL, where
+// OTL = the real timeline: real data, then the extension export). From ALT_START_MS: the
+// Alt audits with their magnitude, the OTL audits negated (before it both are the same and
+// cancel). Same shape as _rdAuditPdp/_rdAuditTs + prefix sums.
+let _exAuditPdp = [], _exAuditTs = [], _exAuditPdpPfx = [], _exAuditTsPfx = [], EX_AUDITS_MAJOR = [];
+_onAltScen(() => {
+  if (!ALT_SCEN) { _exAuditPdp = _exAuditTs = _exAuditPdpPfx = _exAuditTsPfx = EX_AUDITS_MAJOR = []; return; }
+  const otl = [..._arr('REAL_AUDITS').filter(a => a.ms < EXT_START_MS), ..._arr('EXT_AUDITS')
+    .map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta }))
+    .filter(a => a.ms >= EXT_START_MS)];
+  EX_AUDITS_MAJOR = [
+    ...REAL_AUDITS_MAJOR.filter(a => a.ms >= ALT_START_MS),
+    ...otl.filter(a => a.type === 'audit' && a.ms >= ALT_START_MS).map(a => ({ ...a, magnitude: -a.magnitude })),
+  ].sort((x, y) => x.ms - y.ms);
+  _exAuditPdp = EX_AUDITS_MAJOR.filter(a => a.channel === 'pdp');
+  _exAuditTs  = EX_AUDITS_MAJOR.filter(a => a.channel === 'ts');
+  _exAuditPdpPfx = _rdMkPfx(_exAuditPdp);
+  _exAuditTsPfx  = _rdMkPfx(_exAuditTs);
+});
+const getExCumAudit = (t, ch) => ch === 'pdp' ? _cumAuditIn(_exAuditPdp, _exAuditPdpPfx, t) : _cumAuditIn(_exAuditTs, _exAuditTsPfx, t);
 
 // rawArr: [[hourEndTs, channel, delta], ...]
 // Returns: [[null, channel, delta, ts, displayTime], ...] sorted by ts.
@@ -587,6 +614,9 @@ const _saveSS = (d) => {
   _ssCache = Object.assign(_ssCache || {}, d);
   try { localStorage.setItem(_SS_KEY, JSON.stringify(_ssCache)); } catch {}
 };
+// Loading the page resumes the last visit (view, settings, position, play state). At /live,
+// or with no visit saved yet, it applies the startup preset instead: at Now and playing.
+const KEEP_STATE_ON_LOAD = !_urlHas('live') && _loadSS().pos != null;
 
 // Auto-reset of the historical sub-gap chart: when the playhead crosses
 // April 29 6 PM (timestamp values in this file display as UTC but are
@@ -601,9 +631,11 @@ const HIST_AUTO_RESET_IDX = (() => {
   }
   return RAW.length - 1;
 })();
-// SB V2 layout activates at May 20 00:00 EDT (AltScen only - the real data ends May 1).
-// All May/June switch dates in this file are Eastern (EDT = UTC-4), matching Scenario.
-const SB_V2_TS = Date.UTC(2019, 4, 20, 4, 0);
+// SB V2 layout activates at May 20 00:00 EDT with AltScen on, and at Apr 29 18:00 EDT
+// otherwise (real data + extension). All May/June switch dates in this file are Eastern
+// (EDT = UTC-4), matching Scenario.
+let SB_V2_TS;
+_onAltScen(() => { SB_V2_TS = ALT_SCEN ? Date.UTC(2019, 4, 20, 4, 0) : Date.UTC(2019, 3, 29, 22, 0); });
 // The later SB V2 phases are computed from the data, not dated: the "TS Pass PDP"
 // prediction starts at TS_SLOWDOWN_TS (showMidMode), and the Music/TS/PDP order flip
 // happens at TS_LEAD_TS - the first full hour after T-Series overtakes (showTsOverMode).
@@ -705,15 +737,17 @@ const DAY_MS = 24 * HOUR_MS;
 // Start: 2018-10-17 00:00:00 EDT (= UTC+4h); end: 2019-05-01 00:00:00 EDT.
 // Total pairs: 16,934,401 (indices 0..16,934,400 = 196 days inclusive).
 const REAL_DATA_START_MS = Date.UTC(2018, 9, 17, 4, 0, 0); // 2018-10-17 00:00:00 EDT (UTC-4)
-// With AltScen on, the per-second buffer is real data up to ALT_START_MS, then the
-// Scenario export (scenario-pdp-ts.bin) through ALT_END_MS, and the timeline extends to match.
+// The per-second buffer is the real binary up to EXT_START_MS, then the real-data
+// extension (real-pdp-ts.bin) through EXT_END_MS. With AltScen on it is real data up to
+// ALT_START_MS, then the Scenario export (scenario-pdp-ts.bin) through ALT_END_MS.
+// Both modes end at the same time, so the timeline length is the same either way.
+const REAL_BIN_PAIR_COUNT = 16934401; // seconds in the real binary alone (indices 0..16934400, through May 1 00:00 EDT)
 const ALT_PAIR_COUNT = (ALT_END_MS - REAL_DATA_START_MS) / 1000 + 1;
+const EXT_PAIR_COUNT = (EXT_END_MS - REAL_DATA_START_MS) / 1000 + 1;
 let REAL_DATA_PAIR_COUNT, REAL_DATA_END_MS;
 _onAltScen(() => {
-  REAL_DATA_PAIR_COUNT = ALT_SCEN
-    ? ALT_PAIR_COUNT
-    : 16934401; // total seconds in the real binary (indices 0..16934400)
-  REAL_DATA_END_MS = REAL_DATA_START_MS + (REAL_DATA_PAIR_COUNT - 1) * 1000; // real: 2019-05-01 00:00 EDT
+  REAL_DATA_PAIR_COUNT = ALT_SCEN ? ALT_PAIR_COUNT : EXT_PAIR_COUNT;
+  REAL_DATA_END_MS = REAL_DATA_START_MS + (REAL_DATA_PAIR_COUNT - 1) * 1000; // 2019-06-30 23:00 EDT
 });
 
 // Patch editor helpers (module-level, no React deps)
@@ -793,26 +827,32 @@ async function _fetchRealSeries(file) {
   return unpackPVD(await gunzipIfNeeded(await _fetchPacked('/data/' + file)), Uint32Array).data;
 }
 
-async function _loadMergedAlt(file) {
+// Real pairs up to the export's start, then the export's records, through pairCount pairs
+// (pairCount is passed in, not REAL_DATA_PAIR_COUNT: an Alt switch builds the buffer
+// before flipping ALT_SCEN). Any pairs past the export's end hold its last value. If the
+// export can't be loaded, the real data is padded the same way so indices stay valid.
+async function _loadMergedExport(file, exportFile, pairCount) {
   const real = await _fetchRealSeries(file);
-  let altPk;
-  try { altPk = unpackPVD(await gunzipIfNeeded(await _fetchPacked('/data/scenario-pdp-ts.pvd.gz')), Int32Array); }
-  catch { return real; }
-  const altStart = altPk.startMs + ALT_TZ_SHIFT_MS;
-  const { stepMs: step, n, nCh } = altPk;
-  if (step !== 1000 || nCh < 2) return real;
-  const alt = altPk.data;
-  // ALT_PAIR_COUNT, not REAL_DATA_PAIR_COUNT: an Alt switch builds this before flipping ALT_SCEN.
-  const out = new Uint32Array(ALT_PAIR_COUNT * 2);
-  const sw = Math.round((altStart - REAL_DATA_START_MS) / 1000);   // first pair taken from the export
-  out.set(real.subarray(0, Math.min(sw * 2, real.length)));
-  let last = sw - 1;
-  for (let i = 0; i < n && sw + i < ALT_PAIR_COUNT; i++) {
-    out[(sw + i) * 2] = alt[i * nCh];
-    out[(sw + i) * 2 + 1] = alt[i * nCh + 1];
-    last = sw + i;
+  let pk = null;
+  try { pk = unpackPVD(await gunzipIfNeeded(await _fetchPacked('/data/' + exportFile)), Int32Array); }
+  catch { pk = null; }
+  if (pk && (pk.stepMs !== 1000 || pk.nCh < 2)) pk = null;
+  const out = new Uint32Array(pairCount * 2);
+  const realPairs = real.length >> 1;
+  const sw = pk ? Math.round((pk.startMs + ALT_TZ_SHIFT_MS - REAL_DATA_START_MS) / 1000) : realPairs;   // first pair taken from the export
+  const keep = Math.min(sw, realPairs, pairCount);
+  out.set(real.subarray(0, keep * 2));
+  let last = keep - 1;
+  if (pk) {
+    const { n, nCh, data } = pk;
+    for (let i = 0; i < n && sw + i < pairCount; i++) {
+      if (sw + i < 0) continue;
+      out[(sw + i) * 2] = data[i * nCh];
+      out[(sw + i) * 2 + 1] = data[i * nCh + 1];
+      last = sw + i;
+    }
   }
-  for (let j = last + 1; j < ALT_PAIR_COUNT; j++) { out[j * 2] = out[last * 2]; out[j * 2 + 1] = out[last * 2 + 1]; }
+  for (let j = last + 1; j < pairCount; j++) { out[j * 2] = out[last * 2]; out[j * 2 + 1] = out[last * 2 + 1]; }
   return out;
 }
 
@@ -866,7 +906,9 @@ function _computeAltVoteSchedule(buf) {
 let _realDataGen = 0;
 let _realDataFile = null;     // file the installed _realDataBuf came from
 let _realDataVersion = 0;     // bumped per installed buffer; the app's realDataReady holds it
-const _fetchSeriesFor = (file, alt) => alt ? _loadMergedAlt(file) : _fetchRealSeries(file);
+const _fetchSeriesFor = (file, alt) => alt
+  ? _loadMergedExport(file, ALT_FILE, ALT_PAIR_COUNT)
+  : _loadMergedExport(file, EXT_FILE, EXT_PAIR_COUNT);
 // Installs a loaded buffer (for the current ALT_SCEN) with everything computed from it.
 function _installRealData(buf, file) {
   _realDataBuf = buf;
@@ -906,6 +948,50 @@ function realDataAt(t) {
   return { pdp: _realDataBuf[idx * 2], ts: _realDataBuf[idx * 2 + 1] };
 }
 
+// - Excess vs OTL (Alt Scenario only) -
+// Per second: the installed Alt buffer minus the OTL (the real timeline: the real binary,
+// then the extension export - the buffer used with Alt Scenario off), stored only from the
+// first second where they differ (_excessStart); every earlier second is 0. Built on demand
+// (Show Excess / Charts Show Excess) for the installed Alt buffer (_excessForVersion).
+let _excessBuf = null;        // Int32Array [pdp, ts] per second from _excessStart
+let _excessStart = 0;         // pair index of _excessBuf's first entry
+let _excessForVersion = 0;    // _realDataVersion the excess was built from
+let _excessLoading = false;
+const _excessValid = () => !!_excessBuf && ALT_SCEN && _excessForVersion === _realDataVersion;
+function _loadExcess(onDone) {
+  if (!ALT_SCEN || !_realDataBuf) { onDone?.(); return; }
+  if (_excessValid()) { onDone?.(); return; }
+  if (_excessLoading) return;
+  _excessLoading = true;
+  const ver = _realDataVersion, alt = _realDataBuf;
+  _loadMergedExport(_realDataFile || 'every_second_counts_pvt.pvd.gz', EXT_FILE, ALT_PAIR_COUNT)
+    .then(otl => {
+      _excessLoading = false;
+      if (ver !== _realDataVersion || !ALT_SCEN) { onDone?.(); return; }
+      const n = Math.min(alt.length, otl.length) >> 1;
+      let s = 0;
+      while (s < n && alt[s * 2] === otl[s * 2] && alt[s * 2 + 1] === otl[s * 2 + 1]) s++;
+      const ex = new Int32Array((n - s) * 2);
+      for (let k = 0; k < ex.length; k++) ex[k] = alt[s * 2 + k] - otl[s * 2 + k];
+      _excessBuf = ex; _excessStart = s; _excessForVersion = ver;
+      onDone?.();
+    })
+    .catch(() => { _excessLoading = false; onDone?.(); });
+}
+// Excess of channel c (0 = pdp, 1 = ts) at pair index i (caller checks _excessValid()).
+const _exVal = (i, c) => {
+  if (i < _excessStart) return 0;
+  const k = (i - _excessStart) * 2 + c;
+  return k < _excessBuf.length ? _excessBuf[k] : _excessBuf[_excessBuf.length - 2 + c];
+};
+// {pdp, ts} excess at time t (same indexing as realDataAt), or null if not built / out of range.
+function excessAt(t) {
+  if (!_excessValid()) return null;
+  if (t < REAL_DATA_START_MS || t > REAL_DATA_END_MS) return null;
+  const idx = Math.max(0, Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t - REAL_DATA_START_MS) / 1000)));
+  return { pdp: _exVal(idx, 0), ts: _exVal(idx, 1) };
+}
+
 // Secondary buffer: always the raw (unsmoothed) binary, loaded on demand for delta chart.
 let _rawAltBuf = null;
 let _rawAltLoading = false;
@@ -922,6 +1008,7 @@ function rawAltAt(t) {
   if (!_rawAltBuf) return null;
   if (t < REAL_DATA_START_MS || t > REAL_DATA_END_MS) return null;
   const idx = Math.max(0, Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t - REAL_DATA_START_MS) / 1000)));
+  if (idx * 2 + 1 >= _rawAltBuf.length) return null;   // raw file covers the real binary only (not the extension)
   return { pdp: _rawAltBuf[idx * 2], ts: _rawAltBuf[idx * 2 + 1] };
 }
 
@@ -1427,9 +1514,9 @@ _onAltScen(() => {
   _deriveDailyChannel(SBD_REAL_RAW);
   _deriveDailyChannel(FTVD_REAL_RAW);
 
-  // AltScen-only channels. YT Music: daily, same 23:00 ET snapshot convention as SB/FTV.
-  // Slowly Slowly views: hourly, on Scenario's clock (+ALT_TZ_SHIFT_MS onto UTC).
-  MUSIC_RAW  = ALT_SCEN ? _wrapDailyRealForNoise(_arr('YT_MUSIC_D')) : [];
+  // YT Music: daily, same 23:00 ET snapshot convention as SB/FTV - loaded in both modes.
+  // Slowly Slowly views (AltScen only): hourly, on Scenario's clock (+ALT_TZ_SHIFT_MS onto UTC).
+  MUSIC_RAW  = _wrapDailyRealForNoise(_arr('YT_MUSIC_D'));
   SLOWLY_RAW = ALT_SCEN ? _arr('SLOWLY_H').map(([t, v]) => ({ t: t + ALT_TZ_SHIFT_MS, v })) : [];
   _deriveDailyChannel(MUSIC_RAW);
   for (let i = 0; i < SLOWLY_RAW.length; i++) {
@@ -1575,16 +1662,18 @@ const injectAuditBreakpoints = (data) => {
 
 // Real Data mode counterpart: inserts +-2s markers at each REAL_AUDITS timestamp
 // within the data window. Values come from the binary so no Alt audit maths needed.
-const injectRdAuditBreakpoints = (data) => {
-  if (!data.length || !REAL_AUDITS_MAJOR.length) return data;
+// excess: the Excess vs OTL series (its audits, values from excessAt).
+const injectRdAuditBreakpoints = (data, excess = false) => {
+  const audits = excess ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR;
+  if (!data.length || !audits.length) return data;
   const tMin = data[0].t, tMax = data[data.length - 1].t;
-  const relevant = REAL_AUDITS_MAJOR.filter(a => a.ms > tMin && a.ms < tMax);
+  const relevant = audits.filter(a => a.ms > tMin && a.ms < tMax);
   if (!relevant.length) return data;
   const result = [...data];
   for (const a of relevant) {
     for (const dt of [-2000, 2000]) {
       const t = a.ms + dt;
-      const rd = realDataAt(t);
+      const rd = excess ? excessAt(t) : realDataAt(t);
       if (rd) result.push({ t, pt: rd.pdp, tt: rd.ts, g: rd.pdp - rd.ts });
     }
   }
@@ -2863,15 +2952,17 @@ const getFlareNewsMessage = (clockTime) => {
     : [];
   const pdpBy = [...new Set(recentPromos.filter(e => e.channel === 'pdp').map(e => e.by))];
   const tsBy  = [...new Set(recentPromos.filter(e => e.channel === 'ts').map(e => e.by))];
+  // "No promotions lately" only while some channel was promoted in the last 7 days.
+  const anyWeekPromo = showPromos && FLARE_PROMOTIONS.some(e => e.ms <= clockTime && clockTime - e.ms <= 7 * 86400000);
 
   const parts = [
     "This is a replica of FlareTV's PewDiePie vs T-Series Live Sub Count stream, using subscriber data taken from livestreams of the battle at the time, every second.",
     "This stream is powered by FlareTV and Youtube Realtime by Akshat Mittal",
     ...news.map(e => e.label ? e.label + " - " + e.text : e.text),
     ...(showPromos ? [
-      pdpBy.length > 0
-        ? "PewDiePie was recently promoted by " + _fmtNameList(pdpBy)
-        : "PewDiePie has received no promotions lately",
+      ...(pdpBy.length > 0
+        ? ["PewDiePie was recently promoted by " + _fmtNameList(pdpBy)]
+        : anyWeekPromo ? ["PewDiePie has received no promotions lately"] : []),
       ...(tsBy.length > 0 ? ["T-Series was recently promoted by " + _fmtNameList(tsBy)] : []),
     ] : []),
   ];
@@ -3406,7 +3497,8 @@ const FlareView = React.memo(({
   //                                P/T gap pill appears at the top of
   //                                the cards row).
   const _subtitleT = clockTime || 0;
-  const _isMusicEra = _subtitleT >= Date.UTC(2019, 4, 22, 4, 0);
+  // Music-era layout starts May 22 00:00 EDT with Alt Scenario on, Apr 29 18:00 EDT without.
+  const _isMusicEra = _subtitleT >= (ALT_SCEN ? Date.UTC(2019, 4, 22, 4, 0) : Date.UTC(2019, 3, 29, 22, 0));
   // Vote infrastructure is retired at May 20 00:00 UTC - same threshold
   // used by the news-ticker strawpoll fragment. Three things turn off
   // together: the per-card "X Votes / Y%" mini-bar, and the rotating
@@ -4272,8 +4364,8 @@ const DashExpandOverlay = ({ rect, top, closing, onClose, onClosed, children }) 
 // perMin (gain only, mirrors the dashboard /min toggle): lookbacks over 1min are divided by
 // their length in minutes; the 1min gain becomes "1min avg" = mean 1min gain over the trailing 60s.
 const _expPerMinMode = (kind, lbSec, perMin) => (kind !== "gain" || !perMin) ? 0 : lbSec === 60 ? 2 : lbSec > 60 ? 1 : 0;
-const expValueFns = (kind, lbSec, strip, perMin) => {
-  const fns = _expRawValueFns(kind, lbSec, strip);
+const expValueFns = (kind, lbSec, strip, perMin, excess = false) => {
+  const fns = _expRawValueFns(kind, lbSec, strip, excess);
   const mode = _expPerMinMode(kind, lbSec, perMin);
   if (mode === 1) return fns.map(fn => (i) => { const v = fn(i); return v == null ? null : v / (lbSec / 60); });
   if (mode === 2) return fns.map(fn => (i) => {
@@ -4283,14 +4375,17 @@ const expValueFns = (kind, lbSec, strip, perMin) => {
   });
   return fns;
 };
-const _expRawValueFns = (kind, lbSec, strip) => {
-  if (kind === "subs") return [(i) => _realDataBuf[i * 2], (i) => _realDataBuf[i * 2 + 1]];
-  if (kind === "gap") return [(i) => _realDataBuf[i * 2] - _realDataBuf[i * 2 + 1]];
+// excess: read the Excess vs OTL series (Alt minus OTL) instead of the loaded data.
+const _expSrc = (excess) => excess ? _exVal : (i, c) => _realDataBuf[i * 2 + c];
+const _expRawValueFns = (kind, lbSec, strip, excess = false) => {
+  const v2 = _expSrc(excess), cum = excess ? getExCumAudit : getRdCumAudit;
+  if (kind === "subs") return [(i) => v2(i, 0), (i) => v2(i, 1)];
+  if (kind === "gap") return [(i) => v2(i, 0) - v2(i, 1)];
   const mk = (off, ch) => (i) => {
     const j = i - lbSec;
     if (j < 0) return null;
-    let v = _realDataBuf[i * 2 + off] - _realDataBuf[j * 2 + off];
-    if (strip) { const t = REAL_DATA_START_MS + i * 1000; v -= getRdCumAudit(t, ch) - getRdCumAudit(t - lbSec * 1000, ch); }
+    let v = v2(i, off) - v2(j, off);
+    if (strip) { const t = REAL_DATA_START_MS + i * 1000; v -= cum(t, ch) - cum(t - lbSec * 1000, ch); }
     return v;
   };
   return [mk(0, "pdp"), mk(1, "ts")];
@@ -4301,25 +4396,25 @@ const _expRawValueFns = (kind, lbSec, strip) => {
 const EXP_BASE = 16;
 const _expPyrCache = new Map();
 let _expPyrBuf = null;
-const _expBuildBase = (kind, lbSec, strip, s, pmMode) => {
-  const b = _realDataBuf, N = REAL_DATA_PAIR_COUNT;
+const _expBuildBase = (kind, lbSec, strip, s, pmMode, excess = false) => {
+  const v2 = _expSrc(excess), N = REAL_DATA_PAIR_COUNT;
   const nb = Math.ceil(N / EXP_BASE);
   // Float so /min (fractional) values survive.
   const mn = new Float64Array(nb).fill(Infinity), mx = new Float64Array(nb).fill(-Infinity);
   const ring = pmMode === 2 ? new Float64Array(60) : null;   // trailing-60s window for "1min avg"
   let rSum = 0, rN = 0, rHead = 0;
-  const audits = (kind === "gain" && strip) ? (s === 0 ? _rdAuditPdp : _rdAuditTs) : null;
-  const pfx = s === 0 ? _rdAuditPdpPfx : _rdAuditTsPfx;
+  const audits = (kind === "gain" && strip) ? (excess ? (s === 0 ? _exAuditPdp : _exAuditTs) : (s === 0 ? _rdAuditPdp : _rdAuditTs)) : null;
+  const pfx = excess ? (s === 0 ? _exAuditPdpPfx : _exAuditTsPfx) : (s === 0 ? _rdAuditPdpPfx : _rdAuditTsPfx);
   const lbMs = lbSec * 1000;
   let pNow = -1, pPast = -1;
   for (let i = 0; i < N; i++) {
     let v;
-    if (kind === "subs") v = b[i * 2 + s];
-    else if (kind === "gap") v = b[i * 2] - b[i * 2 + 1];
+    if (kind === "subs") v = v2(i, s);
+    else if (kind === "gap") v = v2(i, 0) - v2(i, 1);
     else {
       const j = i - lbSec;
       if (j < 0) continue;
-      v = b[i * 2 + s] - b[j * 2 + s];
+      v = v2(i, s) - v2(j, s);
       if (audits) {
         const t = REAL_DATA_START_MS + i * 1000;
         while (pNow + 1 < audits.length && audits[pNow + 1].ms <= t) pNow++;
@@ -4339,15 +4434,16 @@ const _expBuildBase = (kind, lbSec, strip, s, pmMode) => {
   }
   return { mn, mx };
 };
-const _expPyramid = (kind, lbSec, strip, perMin) => {
+const _expPyramid = (kind, lbSec, strip, perMin, excess = false) => {
   if (_expPyrBuf !== _realDataBuf) { _expPyrCache.clear(); _expPyrBuf = _realDataBuf; }
   const pmMode = _expPerMinMode(kind, lbSec, perMin);
-  const key = kind + "|" + lbSec + "|" + (strip ? 1 : 0) + "|" + pmMode;
+  // Excess keys carry the excess build, so a rebuilt excess never reuses a stale pyramid.
+  const key = kind + "|" + lbSec + "|" + (strip ? 1 : 0) + "|" + pmMode + (excess ? "|ex" + _excessForVersion + ":" + _excessStart : "");
   const hit = _expPyrCache.get(key);
   if (hit) return hit;
   const series = [];
   for (let s = 0; s < (kind === "gap" ? 1 : 2); s++) {
-    const levels = [_expBuildBase(kind, lbSec, strip, s, pmMode)];
+    const levels = [_expBuildBase(kind, lbSec, strip, s, pmMode, excess)];
     while (levels[levels.length - 1].mn.length > 1) {
       const p = levels[levels.length - 1], m = Math.ceil(p.mn.length / 2);
       const mn = new Float64Array(m), mx = new Float64Array(m);
@@ -4429,9 +4525,9 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
   const visKey = visIdx.join(",");
   const fns = useMemo(() => {
     if (!ready) return null;
-    const all = expValueFns(spec.kind, lbSec, spec.strip, spec.perMin);
+    const all = expValueFns(spec.kind, lbSec, spec.strip, spec.perMin, !!spec.excess);
     return visIdx.map(i => all[i]);
-  }, [ready, spec.kind, lbSec, spec.strip, spec.perMin, visKey]);
+  }, [ready, spec.kind, lbSec, spec.strip, spec.perMin, spec.excess, visKey]);
 
   // First build waits for the open animation; later rebuilds (Filter Audits toggled) run at once.
   // pyr is cleared first so the old index is never drawn against the new values.
@@ -4440,11 +4536,11 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
     if (!ready) return;
     setPyr(null);
     const id = setTimeout(() => {
-      setPyr(_expPyramid(spec.kind, lbSec, spec.strip, spec.perMin));
+      setPyr(_expPyramid(spec.kind, lbSec, spec.strip, spec.perMin, !!spec.excess));
       pyrBuiltRef.current = true;
     }, pyrBuiltRef.current ? 30 : EXPAND_MS + 40);
     return () => clearTimeout(id);
-  }, [ready, spec.kind, lbSec, spec.strip, spec.perMin]);
+  }, [ready, spec.kind, lbSec, spec.strip, spec.perMin, spec.excess]);
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -5201,9 +5297,18 @@ async function _setAltScen(on) {
   _installRealData(buf, file);
   _onAltSwapped?.();
 }
-const _altPathOf = (on) => {
-  const rest = window.location.pathname.replace(/^\/alt(?=\/|$)/, '') || '/';
-  return (on ? '/alt' + (rest === '/' ? '' : rest) : rest) + window.location.search + window.location.hash;
+const _altPathOf = (on) => _urlFor(on, _urlHas('live'));
+
+// Predict Overtake: ms until T-Series catches PewDiePie at the given subs/min rates
+// (rounded, as the table shows them). Null if no overtake is ahead at those rates, or
+// if it is more than a year away - such a prediction is ignored.
+const OVERTAKE_MAX_MS = 365 * DAY_MS;
+const overtakeInMs = (gap, pdpRate, tsRate) => {
+  if (gap == null || pdpRate == null || tsRate == null || gap <= 0) return null;
+  const pr = Math.round(pdpRate), tr = Math.round(tsRate);
+  if (tr <= pr) return null;
+  const ms = (gap / (tr - pr)) * 60000;
+  return ms <= OVERTAKE_MAX_MS ? ms : null;
 };
 
 // - MAIN COMPONENT -
@@ -5263,7 +5368,7 @@ export default function SocialBladeLive() {
   // Compute "Now" position: map current real-world clock to 2019 timeline
   const initNowPos = useMemo(() => nowToPos(), []);
 
-  // STARTUP: always lands on Now, ignoring the saved position (except a state-keeping reload).
+  // STARTUP: resumes the saved position, or lands on Now at /live (see KEEP_STATE_ON_LOAD).
   const _keptPos = KEEP_STATE_ON_LOAD && _ss.pos != null ? Math.max(0, Math.min(REAL_DATA_HOURS, _ss.pos)) : null;
   const [pos, setPos] = useState(_keptPos ?? initNowPos);
   const [menuOpen, setMenuOpen] = useState(() => _ss.menuOpen != null ? _ss.menuOpen : true);
@@ -5321,6 +5426,18 @@ export default function SocialBladeLive() {
   // In Real Data mode, audit stripping uses getRdCumAudit (from REAL_AUDITS).
   // In Alt Scenario mode it uses getCumAudit. Same toggle drives both.
   const effectiveFilterAudits = filterAudits;
+  // Excess vs OTL (Alt Scenario only; the buttons show only with Alt Scenario on):
+  // Show Excess adds the "Excess Subs vs OTL" readout; Charts Show Excess plots every
+  // dashboard chart (and the Explorer) as Alt minus OTL. excessReady = the installed
+  // buffer version the excess was built for (0 = not built).
+  const [showExcess, setShowExcess] = useState(() => _ss.showExcess ?? false);
+  const [chartsExcess, setChartsExcess] = useState(() => _ss.chartsExcess ?? false);
+  const [excessReady, setExcessReady] = useState(0);
+  const excessOn = ALT_SCEN && excessReady > 0 && excessReady === _realDataVersion && _excessValid();
+  const exPanelOn = ALT_SCEN && showExcess;
+  const exChartsOn = excessOn && chartsExcess;
+  // Audit offsets matching the charted series (Filter Audits).
+  const chartCumAudit = exChartsOn ? getExCumAudit : getRdCumAudit;
   // Flare view is a standalone top-level mode (peer to SocialBlade and Dashboard).
   // Per-view toggles: light vs. dark palette, and an Extra Info overlay that
   // (a) renders vote percentages at 2-decimal precision and (b) shows the
@@ -5371,8 +5488,8 @@ export default function SocialBladeLive() {
   const posRef = useRef(_keptPos ?? initNowPos);
   const effectiveMultRef = useRef(mult);
 
-  // STARTUP: every load is forced to the same preset regardless of saved
-  // state - SocialBlade, dark, Predict Overtake, 14d Sub Gap, Realtime at 1x,
+  // STARTUP: a load at /live (or the first visit) is forced to the same preset
+  // regardless of saved state - SocialBlade, dark, Predict Overtake, 14d Sub Gap, Realtime at 1x,
   // 2s counter interval, 0.69 desync, Snap on, at Now and playing. The view /
   // toggle / interval / position parts are set in their useState inits above.
   const didInit = useRef(false);
@@ -5380,7 +5497,7 @@ export default function SocialBladeLive() {
     if (didInit.current) return;
     didInit.current = true;
     if (KEEP_STATE_ON_LOAD) {
-      // State-keeping reload (AltScen toggle): restore the saved playback settings.
+      // Resuming the last visit: restore the saved playback settings.
       dispatch({type:"SET_MODE", mode: _ss.speedMode ?? "rt"});
       dispatch({type:"SET_MULT", mult: _ss.mult ?? 1});
       dispatch({type:"SET_DESYNC", value: _ss.desync ?? 0.69});
@@ -5402,7 +5519,7 @@ export default function SocialBladeLive() {
     window._dismissLoading?.();
     if (didStartGoto.current) return;
     didStartGoto.current = true;
-    // State-keeping reload: stay where the user was; resume only if it was playing.
+    // Resuming the last visit: stay where the user was; play only if it was playing.
     if (KEEP_STATE_ON_LOAD) { if (_ss.playing) dispatch({type:"PLAY"}); return; }
     requestAnimationFrame(() => {
       const p = nowToPos();
@@ -5418,8 +5535,8 @@ export default function SocialBladeLive() {
     _saveSS({ speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval });
   }, [speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval]);
   useEffect(() => {
-    _saveSS({ view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
-  }, [view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
+    _saveSS({ view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
+  }, [view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
   useEffect(() => {
     const id = setInterval(() => { _saveSS({ pos: posRef.current }); }, 3000);
     return () => clearInterval(id);
@@ -5492,6 +5609,7 @@ export default function SocialBladeLive() {
   // keeping everything else. Only the playhead moves, and only if the new timeline ends
   // before it (leaving Alt past May 1). Browser back/forward between / and /alt switches too.
   const [altSwitching, setAltSwitching] = useState(false);   // the other mode's data is being built
+  const [liveUrl, setLiveUrl] = useState(() => _urlHas('live'));
   useEffect(() => {
     _onAltSwapped = () => {
       setRealDataReady(_realDataBuf ? _realDataVersion : 0);
@@ -5501,10 +5619,16 @@ export default function SocialBladeLive() {
       }
       setAltSwitching(false);
     };
-    const onPop = () => { const on = /^\/alt(\/|$)/.test(window.location.pathname); if (on !== (_altSwitchTarget ?? ALT_SCEN)) { setAltSwitching(true); _setAltScen(on); } };
+    const onPop = () => { setLiveUrl(_urlHas('live')); const on = _urlHas('alt'); if (on !== (_altSwitchTarget ?? ALT_SCEN)) { setAltSwitching(true); _setAltScen(on); } };
     window.addEventListener('popstate', onPop);
     return () => { _onAltSwapped = null; window.removeEventListener('popstate', onPop); };
   }, []);
+
+  // Build the Excess vs OTL buffer on demand (Alt Scenario on and either Excess toggle on).
+  useEffect(() => {
+    if (!ALT_SCEN || !realDataReady || !(showExcess || chartsExcess)) return;
+    _loadExcess(() => setExcessReady(_excessValid() ? _excessForVersion : 0));
+  }, [showExcess, chartsExcess, realDataReady]);
 
   // Load raw alt buffer on demand for delta chart.
   useEffect(() => {
@@ -5517,6 +5641,39 @@ export default function SocialBladeLive() {
   const clearRT = useCallback(() => {
     setRtDisplay({ pt:null, tt:null, sb:null, ftv:null, gap:null });
   }, []);
+  // Live mode (/live) lasts only while following Now: any seek, pause, reverse or speed
+  // change leaves it. It arms once playing at 1x realtime, so the jump into Live doesn't
+  // count; leaving replaces the history entry so Back can't land on a /live it just left.
+  const liveArmedRef = useRef(false), liveSeekRef = useRef(seekToken);
+  useEffect(() => {
+    if (!liveUrl) { liveArmedRef.current = false; return; }
+    const following = playing && !reverse && speedMode === "rt" && mult === 1;
+    if (!liveArmedRef.current) {
+      if (following) { liveArmedRef.current = true; liveSeekRef.current = seekToken; }
+      return;
+    }
+    if (following && seekToken === liveSeekRef.current) return;
+    window.history.replaceState(null, '', _urlFor(_urlHas('alt'), false));
+    setLiveUrl(false);
+  }, [liveUrl, playing, reverse, speedMode, mult, seekToken]);
+  const goNow = () => {
+    liveArmedRef.current = false;
+    const p = nowToPos();
+    posRef.current = p; setPos(p);
+    clearRT();
+    dispatch({type:"BUMP_SEEK"});
+    dispatch({type:"SET_MODE", mode:"rt"});
+    // Flare wants one coherent live clock; SB / Dashboard want desync + minute snap.
+    if (view === "flare") {
+      dispatch({type:"SET_DESYNC", value:0});
+      if (minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
+    } else {
+      dispatch({type:"SET_DESYNC", value:0.7});
+      if (!minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
+    }
+    dispatch({type:"SET_MULT", mult:1});
+    dispatch({type:"PLAY"});
+  };
   // Gap text update throttle for RT modes (every 5 data-seconds)
   
 
@@ -5826,7 +5983,7 @@ export default function SocialBladeLive() {
   const _sDomGap1d   = useSmoothBounds(roundDomain(domGap1d),   smoothDur, smoothEnabled);
   // SB V2 Music gap sparklines (Music/PDP, or Music/TS once TS leads): same rounded,
   // eased bounds as the PDP/TS gap charts.
-  const _musicVsTs = curTime >= TS_LEAD_TS;
+  const _musicVsTs = !ALT_SCEN || curTime >= TS_LEAD_TS;   // matches showTsOverMode
   const domMusicGap1h = useMemo(() => getRange(_musicVsTs ? musicTsGap1hData : musicPdpGap1hData, ["g"], tMinGap1h, gapTime, null),
     [_musicVsTs, musicTsGap1hData, musicPdpGap1hData, tMinGap1h, gapTime]);
   const domMusicGap1d = useMemo(() => getRange(_musicVsTs ? musicTsGap1dData : musicPdpGap1dData, ["g"], tMinGap1d, gapTime, null),
@@ -5837,6 +5994,19 @@ export default function SocialBladeLive() {
   const sDomTs1h    = _sDomTs1h;
   const sDomGap1h   = _sDomGap1h;
   const sDomGap1d   = _sDomGap1d;
+  // SB V2 bottom gap: PDP - TS with AltScen on; TS - PDP otherwise (TS leads there).
+  // Same series as the PDP/TS gap charts, negated; domains mirror accordingly.
+  const _v2GapFlip = !ALT_SCEN;
+  const _negG = (arr) => arr.map(d => (d.g == null ? d : { ...d, g: -d.g }));
+  const _negDom = (dom) => (Array.isArray(dom) && typeof dom[0] === 'number' && typeof dom[1] === 'number') ? [-dom[1], -dom[0]] : dom;
+  const v2Gap1hData   = useMemo(() => _v2GapFlip ? _negG(gap1hData)   : gap1hData,   [_v2GapFlip, gap1hData]);
+  const v2Gap1dData   = useMemo(() => _v2GapFlip ? _negG(gap1dData)   : gap1dData,   [_v2GapFlip, gap1dData]);
+  const v2HistGapData = useMemo(() => _v2GapFlip ? _negG(histGapData) : histGapData, [_v2GapFlip, histGapData]);
+  const v2DomGap1h = _v2GapFlip ? _negDom(sDomGap1h) : sDomGap1h;
+  const v2DomGap1d = _v2GapFlip ? _negDom(sDomGap1d) : sDomGap1d;
+  const v2HistGapAxis = _v2GapFlip
+    ? roundGapAxis(v2HistGapData, _domExtraCP?.g != null ? -_domExtraCP.g : null)
+    : histGapAxis;
 
   // Rates
   const pdpPerMin = useMemo(() => getMomentaryRate(pos, "pt"), [pos]);
@@ -6165,17 +6335,13 @@ export default function SocialBladeLive() {
     : (displayPt != null && displayTt != null ? displayPt - displayTt : null);
 
   // Predict Overtake only takes effect while an overtake is still ahead: the
-  // gap must be > 0 and at least one of the 1-30 day avg columns must have
-  // T-Series gaining faster than PewDiePie. Re-evaluated only when the table
+  // gap must be > 0 and at least one of the 1-30 day avg columns must predict
+  // T-Series passing PewDiePie within a year. Re-evaluated only when the table
   // updates (tableTime), not on every counter tick.
   const sbOvertakeActive = useMemo(() => {
     if (!sbOvertake) return false;
     const gap = tableDisplayPt != null && tableDisplayTt != null ? tableDisplayPt - tableDisplayTt : currentGap;
-    if (gap == null || gap <= 0) return false;
-    return [4,5,6,7,8,9,10].some(ri => {
-      const p = subsPerMinTable.pdp[ri], t = subsPerMinTable.ts[ri];
-      return p != null && t != null && Math.round(t) > Math.round(p);
-    });
+    return [4,5,6,7,8,9,10].some(ri => overtakeInMs(gap, subsPerMinTable.pdp[ri], subsPerMinTable.ts[ri]) != null);
   }, [sbOvertake, tableTime, subsPerMinTable]);
 
   // effectiveSpeed: absolute sim-sec/real-sec shown next to the Dynamic button.
@@ -6314,7 +6480,8 @@ export default function SocialBladeLive() {
 
   const showSBv2 = curTime >= SB_V2_TS;
   const showMidMode = curTime >= TS_SLOWDOWN_TS;
-  const showTsOverMode = curTime >= TS_LEAD_TS;
+  // Non-alt: V2 is always in the Music / T-Series / PewDiePie order (TS already leads).
+  const showTsOverMode = !ALT_SCEN || curTime >= TS_LEAD_TS;
   const v2ForcedPreTrigger = false;   // no V1/V2 layout override in this app
 
   // Gap text label
@@ -6557,10 +6724,12 @@ export default function SocialBladeLive() {
     const el = leftPanelRef.current;
     if (el?.parentElement) ro.observe(el.parentElement);
     if (el) for (const c of el.children) ro.observe(c);
-    return () => { alive = false; ro.disconnect(); };
-  }, [view, dashShowCharts, barHidden, menuOpen, dashAltLayout]);
+    // Counters render new digit counts in their own effect, after this one - measure again once they have.
+    const settle = setTimeout(measure, 100);
+    return () => { alive = false; clearTimeout(settle); ro.disconnect(); };
+  }, [view, dashShowCharts, barHidden, menuOpen, dashAltLayout, exPanelOn, String(Math.round(Math.abs(currentGap ?? 0))).length, String(Math.round(displayPt ?? 0)).length, String(Math.round(displayTt ?? 0)).length]);
 
-  const pdpLeading = displayPt != null && displayTt != null && displayPt >= displayTt;
+  const pdpLeading =displayPt != null && displayTt != null && displayPt >= displayTt;
 
   const fmtLeadDuration = (ms) => {
     if (ms == null || ms < 0) return "\u2014";
@@ -6902,7 +7071,7 @@ export default function SocialBladeLive() {
   const _altGain48hBucket = _altBucketFor(gainCharts[5][1] * HOUR_MS);
 
   const _altPdpTsAt = (t) => {
-    const rd = realDataAt(t);
+    const rd = exChartsOn ? excessAt(t) : realDataAt(t);
     return rd ? { pt: rd.pdp, tt: rd.ts } : null;
   };
 
@@ -6922,7 +7091,7 @@ export default function SocialBladeLive() {
     }
     const vEnd = _altPdpTsAt(tEnd);
     if (vEnd) pts.push({ t: tEnd, pt: vEnd.pt, tt: vEnd.tt, g: vEnd.pt - vEnd.tt, gap: vEnd.pt - vEnd.tt });
-    return _altNormalizeGap(injectRdAuditBreakpoints(pts));
+    return _altNormalizeGap(injectRdAuditBreakpoints(pts, exChartsOn));
   };
 
   const _altBuildTotalData = (bucket) => {
@@ -6935,7 +7104,7 @@ export default function SocialBladeLive() {
     }
     const vEnd = _altPdpTsAt(tEnd);
     if (vEnd) pts.push({ t: tEnd, pt: vEnd.pt, tt: vEnd.tt, g: vEnd.pt - vEnd.tt });
-    return injectRdAuditBreakpoints(pts);
+    return injectRdAuditBreakpoints(pts, exChartsOn);
   };
 
   const _altBuildGainData = (bucket, ci) => {
@@ -6951,8 +7120,8 @@ export default function SocialBladeLive() {
       if (!now || !past) return null;
       let gp = now.pt - past.pt, gt = now.tt - past.tt;
       if (strip) {
-        gp -= getRdCumAudit(t, "pdp") - getRdCumAudit(t - lbMs, "pdp");
-        gt -= getRdCumAudit(t, "ts")  - getRdCumAudit(t - lbMs, "ts");
+        gp -= chartCumAudit(t, "pdp") - chartCumAudit(t - lbMs, "pdp");
+        gt -= chartCumAudit(t, "ts")  - chartCumAudit(t - lbMs, "ts");
       }
       return {
         t,
@@ -6972,7 +7141,7 @@ export default function SocialBladeLive() {
     }
     const endPoint = pointAt(tEnd);
     if (endPoint && (!pts.length || pts[pts.length - 1].t !== tEnd)) pts.push(endPoint);
-    return injectRdAuditBreakpoints(pts)
+    return injectRdAuditBreakpoints(pts, exChartsOn)
       .map(d => d.gp != null && d.gt != null ? d : pointAt(d.t))
       .filter(Boolean);
   };
@@ -6980,59 +7149,59 @@ export default function SocialBladeLive() {
   const altGap1hData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts) return [];
     return _altBuildGapData(_altGap1hBucket, MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGap1hBucket.key, _altGap1hBucket.quantum, _altGap1hBucket.step, _altGap1hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGap1hBucket.key, _altGap1hBucket.quantum, _altGap1hBucket.step, _altGap1hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady, exChartsOn]);
 
   const altGap24hData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts) return [];
     return _altBuildGapData(_altGap24hBucket, 5 * MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGap24hBucket.key, _altGap24hBucket.quantum, _altGap24hBucket.step, _altGap24hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGap24hBucket.key, _altGap24hBucket.quantum, _altGap24hBucket.step, _altGap24hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady, exChartsOn]);
 
   const altTotalData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts) return [];
     return _altBuildTotalData(_altDashBucket, 15 * MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashWin, _altDashBucket.key, _altDashBucket.quantum, _altDashBucket.step, _altDashBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashWin, _altDashBucket.key, _altDashBucket.quantum, _altDashBucket.step, _altDashBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady, exChartsOn]);
 
   const altGain1hData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts) return [];
     return _altBuildGainData(_altGain1hBucket, 6, MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGain1hBucket.key, _altGain1hBucket.quantum, _altGain1hBucket.step, _altGain1hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGain1hBucket.key, _altGain1hBucket.quantum, _altGain1hBucket.step, _altGain1hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady, exChartsOn]);
 
   const altGain24hData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts) return [];
     return _altBuildGainData(_altGain24hBucket, 2, 5 * MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGain24hBucket.key, _altGain24hBucket.quantum, _altGain24hBucket.step, _altGain24hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, _altGain24hBucket.key, _altGain24hBucket.quantum, _altGain24hBucket.step, _altGain24hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady, exChartsOn]);
 
   const altGainDashData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts) return [];
     return _altBuildGainData(_altGainDashBucket, 4, 15 * MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashWin, _altGainDashBucket.key, _altGainDashBucket.quantum, _altGainDashBucket.step, _altGainDashBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashWin, _altGainDashBucket.key, _altGainDashBucket.quantum, _altGainDashBucket.step, _altGainDashBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady, exChartsOn]);
 
   // Alt+ only: ci0 (1min gain / 10min window) and ci1 (10min gain / 1hr window).
   const altGain10mData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltPlus || !altDenseCharts) return [];
     return _altBuildGainData(_altGain10mBucket, 0, MINUTE);
-  }, [view, dashShowCharts, dashAltPlus, altDenseCharts, _altGain10mBucket.key, _altGain10mBucket.quantum, _altGain10mBucket.step, _altGain10mBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady]);
+  }, [view, dashShowCharts, dashAltPlus, altDenseCharts, _altGain10mBucket.key, _altGain10mBucket.quantum, _altGain10mBucket.step, _altGain10mBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady, exChartsOn]);
 
   const altGain1hLb10Data = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltPlus || !altDenseCharts) return [];
     return _altBuildGainData(_altGain1hBucket, 1, MINUTE);
-  }, [view, dashShowCharts, dashAltPlus, altDenseCharts, _altGain1hBucket.key, _altGain1hBucket.quantum, _altGain1hBucket.step, _altGain1hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady]);
+  }, [view, dashShowCharts, dashAltPlus, altDenseCharts, _altGain1hBucket.key, _altGain1hBucket.quantum, _altGain1hBucket.step, _altGain1hBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady, exChartsOn]);
 
   const altGap10mData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltPlus || !altDenseCharts) return [];
     return _altBuildGapData(_altGap10mBucket, MINUTE);
-  }, [view, dashShowCharts, dashAltPlus, altDenseCharts, _altGap10mBucket.key, _altGap10mBucket.quantum, _altGap10mBucket.step, _altGap10mBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady]);
+  }, [view, dashShowCharts, dashAltPlus, altDenseCharts, _altGap10mBucket.key, _altGap10mBucket.quantum, _altGap10mBucket.step, _altGap10mBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady, exChartsOn]);
 
   // Per-second (ci7): 1s gain + 1min gap over the last minute, for Alt and Alt+.
   const altGain1sData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts || !dashPerSecond) return [];
     return _altBuildGainData(_altPerSecBucket, 7, MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashPerSecond, _altPerSecBucket.key, _altPerSecBucket.quantum, _altPerSecBucket.step, _altPerSecBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashPerSecond, _altPerSecBucket.key, _altPerSecBucket.quantum, _altPerSecBucket.step, _altPerSecBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, effectiveFilterAudits, realDataReady, exChartsOn]);
 
   const altGap1mData = useMemo(() => {
     if (view !== "dashboard" || !dashShowCharts || !dashAltLayout || !altDenseCharts || !dashPerSecond) return [];
     return _altBuildGapData(_altPerSecBucket, MINUTE);
-  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashPerSecond, _altPerSecBucket.key, _altPerSecBucket.quantum, _altPerSecBucket.step, _altPerSecBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady]);
+  }, [view, dashShowCharts, dashAltLayout, altDenseCharts, dashPerSecond, _altPerSecBucket.key, _altPerSecBucket.quantum, _altPerSecBucket.step, _altPerSecBucket.periodSec, useNoise, rtPeriodSec, speedMode, interpAt, realDataReady, exChartsOn]);
 
   const altGainData = useMemo(() => {
     const data = [[], [], [], [], [], [], [], [], []];
@@ -7079,13 +7248,13 @@ export default function SocialBladeLive() {
     _altGain12hBucket.quantum, _altGainDashBucket.quantum, _altGain48hBucket.quantum, _altPerSecBucket.quantum,
     _altGain10mBucket.step, _altGain1hBucket.step, _altGain24hBucket.step,
     _altGain12hBucket.step, _altGainDashBucket.step, _altGain48hBucket.step, _altPerSecBucket.step,
-    effectiveFilterAudits, realDataReady]);
+    effectiveFilterAudits, realDataReady, exChartsOn]);
 
   const rdDashTotalData = useMemo(() => {
     if (view !== 'dashboard' || !dashShowCharts) return [];
     return _altBuildTotalData(_altDashBucket);
   }, [view, dashShowCharts, dashWin,
-    _altDashBucket.key, _altDashBucket.quantum, _altDashBucket.step, realDataReady]);
+    _altDashBucket.key, _altDashBucket.quantum, _altDashBucket.step, realDataReady, exChartsOn]);
 
   // Raw-minus-smooth delta chart data: 1h window, 10s step, both channels.
   // Only meaningful when smooth binary is loaded (rawMode=false) and raw alt buffer is ready.
@@ -7096,6 +7265,7 @@ export default function SocialBladeLive() {
     const out = [];
     for (let t = tStart; t <= tEnd; t += 1000) {
       const idx = Math.max(0, Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t - REAL_DATA_START_MS) / 1000)));
+      if (idx*2+1 >= _rawAltBuf.length) break;   // raw file ends where the extension starts
       out.push({ t, pdp: _rawAltBuf[idx*2] - _realDataBuf[idx*2], ts: _rawAltBuf[idx*2+1] - _realDataBuf[idx*2+1] });
     }
     return out;
@@ -7150,6 +7320,10 @@ export default function SocialBladeLive() {
       </span>
     );
   };
+  // Sub Gap style: absolute value, no sign - the caller colors it by the leading channel.
+  const dashRenderSubGap = (value) => (isRTMode
+    ? <CasinoCounter value={value != null ? Math.abs(value) : null} duration={dur} seekToken={seekToken}/>
+    : (value != null ? Math.round(Math.abs(value)).toLocaleString() : "-"));
   // Flare variant: absolute value, no sign. Uses the snappier FlareCasinoCounter,
   // whose duration is a fixed constant - deliberately independent of the current
   // playback mode (Fast RT / Slow RT / mult), so the Flare counter always feels
@@ -7234,7 +7408,9 @@ export default function SocialBladeLive() {
     <DashExpandOverlay rect={explorer.rect} top={barH} closing={explorer.closing} onClose={closeExplorer} onClosed={finishExplorer}>
       <ChartExplorer spec={{ ...explorer, strip: explorer.kind === "gain" && effectiveFilterAudits,
         perMin: explorer.kind === "gain" && dashGainPerMin,
-        title: explorer.kind === "gain" && dashGainPerMin && explorer.lbSec >= 60 ? explorer.title.replace("Gain", "avg") : explorer.title }} curTime={curTime} ready={realDataReady} onClose={closeExplorer} dc={eDC} dev={devMode} chan={dashChanFilter}/>
+        // Charts Show Excess: the Explorer plots the Excess vs OTL series too.
+        excess: exChartsOn,
+        title: (exChartsOn ? "Excess " : "") + (explorer.kind === "gain" && dashGainPerMin && explorer.lbSec >= 60 ? explorer.title.replace("Gain", "avg") : explorer.title) }} curTime={curTime} ready={exChartsOn ? excessReady : realDataReady} onClose={closeExplorer} dc={eDC} dev={devMode} chan={dashChanFilter}/>
     </DashExpandOverlay>,
     document.body);
 
@@ -7284,7 +7460,7 @@ export default function SocialBladeLive() {
     let _exGainB = (_gNow && _gPast) ? Math.round(_gNow.b - _gPast.b) : null;
     if (auditChans) {
       const aA = auditChans[0] && auditChans[0].ch, aB = auditChans[1] && auditChans[1].ch;
-      const cumFn = appMode === 'real' ? getRdCumAudit : getCumAudit;
+      const cumFn = appMode === 'real' ? chartCumAudit : getCumAudit;
       if (_exGainA != null && aA) _exGainA -= Math.round(cumFn(curTime, aA) - cumFn(curTime - lbMs, aA));
       if (_exGainB != null && aB) _exGainB -= Math.round(cumFn(curTime, aB) - cumFn(curTime - lbMs, aB));
     }
@@ -7295,7 +7471,7 @@ export default function SocialBladeLive() {
     // 1min avg: exact end-dot = mean of the per-second 1min gains over the last 60s.
     if (avg1m && cfg.valAt) {
       const aA = auditChans && auditChans[0] && auditChans[0].ch, aB = auditChans && auditChans[1] && auditChans[1].ch;
-      const cumFn = appMode === 'real' ? getRdCumAudit : getCumAudit;
+      const cumFn = appMode === 'real' ? chartCumAudit : getCumAudit;
       let sA = 0, sB = 0, n = 0;
       for (let k = 0; k < 60; k++) {
         const t = curTime - k * 1000, g1 = cfg.valAt(t), g0 = cfg.valAt(t - lbMs);
@@ -7310,7 +7486,7 @@ export default function SocialBladeLive() {
     const tMin = Math.max(curTime - span * HOUR_MS, cfg.dataStart);
     const auditLines = (auditChans && lb <= 1)
       ? (appMode === 'real'
-          ? REAL_AUDITS_MAJOR.filter(a => a.ms >= tMin && a.ms <= curTime && auditChans.some(m => m.ch === a.channel))
+          ? (exChartsOn ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a => a.ms >= tMin && a.ms <= curTime && auditChans.some(m => m.ch === a.channel))
           : AUDITS.filter(a => a[3] >= tMin && a[3] <= curTime && auditChans.some(m => m.ch === a[1])))
       : [];
     const xDom = [tMin, curTime];
@@ -7347,7 +7523,7 @@ export default function SocialBladeLive() {
       </React.Fragment>
     );
     return (
-      <DashChartCard title={(dashGainPerMin && lbMins >= 1) ? cfg.gainLabels[effectiveCi].replace("Gain", "avg") : cfg.gainLabels[effectiveCi]} dc={eDC} controls={cardControls} onExpand={openGainExplorer(Math.round(lb * 3600), tMin)}>
+      <DashChartCard title={(cfg.viewPrefix || "") + ((dashGainPerMin && lbMins >= 1) ? cfg.gainLabels[effectiveCi].replace("Gain", "avg") : cfg.gainLabels[effectiveCi])} dc={eDC} controls={cardControls} onExpand={openGainExplorer(Math.round(lb * 3600), tMin)}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gd} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
@@ -7392,7 +7568,7 @@ export default function SocialBladeLive() {
       return xFmtBaseGap(ts);
     };
     return (
-      <DashChartCard title={gapLabel} dc={eDC} onExpand={openExplorer({ kind: "gap", title: "Subscriber Gap", t0: tMin, t1: curTime })}>
+      <DashChartCard title={(cfg.viewPrefix || "") + gapLabel} dc={eDC} onExpand={openExplorer({ kind: "gap", title: "Subscriber Gap", t0: tMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gd} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
@@ -7464,7 +7640,7 @@ export default function SocialBladeLive() {
   };
 
   const renderNormalDashboard = ({
-    barH, chanA, chanB, gap, leadingIsA, renderGap,
+    barH, chanA, chanB, gap, leadingIsA,
     diffLabel, aheadLabel, aheadName, leadDuration,
     subsLabel, showRates,
     chartCfg, pairedLabels, legendItems,
@@ -7495,13 +7671,14 @@ export default function SocialBladeLive() {
           </div>
           {/* Gap block */}
           <div style={{display:"flex",alignItems:"center",padding:"8px 0",borderTop:"1px solid "+eDC.BORDER,borderBottom:"1px solid "+eDC.BORDER,margin:"8px 0",gap:12}}>
-            <div style={{flex:3,minWidth:0,overflow:"hidden"}}>
+            {/* Natural width, never clipped: the panel's zoom fit (leftPanelRef) measures this row. */}
+            <div style={{flex:"0 0 auto"}}>
               <div style={{fontSize:10,color:eDC.DIM,fontWeight:700,marginBottom:4,whiteSpace:"nowrap"}}>{diffLabel}</div>
-              <div style={{fontSize:40,fontWeight:800,fontVariantNumeric:"tabular-nums",lineHeight:1,color:gap!=null?(gap>=0?eDC.GAP_POS:eDC.GAP_NEG):eDC.DIM}}>
-                {renderGap(gap)}
+              <div style={{fontSize:40,fontWeight:800,fontVariantNumeric:"tabular-nums",lineHeight:1,whiteSpace:"nowrap",color:gap!=null?(leadingIsA?"rgba(160,200,255,1)":"rgba(255,160,160,1)"):eDC.DIM}}>
+                {dashRenderSubGap(gap)}
               </div>
             </div>
-            <div style={{flex:2,minWidth:0,textAlign:"right"}}>
+            <div style={{flex:"1 0 auto",textAlign:"right",whiteSpace:"nowrap"}}>
               <div style={{fontSize:10,color:eDC.DIM,marginBottom:2}}>{aheadLabel}</div>
               <div style={{fontSize:16,fontWeight:700,color:leadingIsA?chanA.color:chanB.color,marginBottom:1}}>{aheadName}</div>
               <div style={{fontSize:12,color:eDC.DIM,fontVariantNumeric:"tabular-nums"}}>{leadDuration}</div>
@@ -7527,7 +7704,10 @@ export default function SocialBladeLive() {
             </div>}
           </div>
           {milestoneEl}
-          {timezonesEl}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:16}}>
+            <div style={{flex:"0 0 auto"}}>{timezonesEl}</div>
+            {exPanelOn && <div style={{flex:"0 0 auto",whiteSpace:"nowrap"}}>{renderExcessReadout(true)}</div>}
+          </div>
         </div>
       </div>
       {/* RIGHT PANEL */}
@@ -7661,7 +7841,7 @@ export default function SocialBladeLive() {
             <div style={{background:eDC.CARD,border:"1px solid "+eDC.BORDER,borderRadius:10,padding:"6px 10px",boxSizing:"border-box",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
               <div style={{fontSize:14,color:eDC.DIM,fontWeight:400,marginBottom:4}}>Sub Gap</div>
               <div style={{fontSize:36,fontWeight:800,fontVariantNumeric:"tabular-nums",lineHeight:1,color:gap!=null?(leadingIsA?"rgba(160,200,255,1)":"rgba(255,160,160,1)"):eDC.DIM,textAlign:"center"}}>
-                {isRTMode?<CasinoCounter value={gap!=null?Math.abs(gap):null} duration={dur} seekToken={seekToken}/>:(gap!=null?Math.round(Math.abs(gap)).toLocaleString():"-")}
+                {dashRenderSubGap(gap)}
               </div>
             </div>
             <div style={{background:eDC.CARD,border:"1px solid "+eDC.BORDER,borderRadius:10,padding:"0 12px",boxSizing:"border-box",display:"flex",flexDirection:"column",justifyContent:"center"}}>
@@ -7673,6 +7853,7 @@ export default function SocialBladeLive() {
                 <div style={{fontSize:14,fontWeight:700,color:leadingIsA?chanA.color:chanB.color}}>{aheadName}</div>
                 <div style={{fontSize:11,color:eDC.DIM,fontVariantNumeric:"tabular-nums"}}>{leadDuration}</div>
               </div>
+              {exPanelOn ? <div style={{display:"flex",flexDirection:"column",justifyContent:"center",paddingLeft:14,marginLeft:14,borderLeft:"1px solid "+eDC.BORDER}}>{renderExcessReadout(false)}</div> :
               <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingLeft:14,marginLeft:14,borderLeft:"1px solid "+eDC.BORDER}}>
                 <div>
                   <div style={{fontSize:8,color:eDC.DIM,fontWeight:600,marginBottom:1}}>Number of Takeovers</div>
@@ -7687,7 +7868,7 @@ export default function SocialBladeLive() {
                     return <div style={{fontSize:12,fontWeight:700,fontVariantNumeric:"tabular-nums",color:eDC.TS}}>{fmt}</div>;
                   })()}
                 </div>
-              </div>
+              </div>}
             </div>
           </div>
         </div>
@@ -7728,6 +7909,29 @@ export default function SocialBladeLive() {
     );
   };
 
+  // Show Excess: "Excess Subs vs OTL" readout (ported from SCENARIO). Excess = the Alt
+  // Scenario count minus the OTL (real timeline) count at the same second; Diff = each
+  // channel's share of the combined excess while both are positive. big = Default layouts.
+  const renderExcessReadout = (big = false) => {
+    const ex = excessOn ? excessAt(curTime) : null;
+    const pdpEx = ex ? ex.pdp : null, tsEx = ex ? ex.ts : null;
+    const fs1 = big ? 14 : 10, lbl = big ? 11 : 9;
+    const val = (v) => v != null && v !== 0
+      ? (isRTMode ? <CasinoCounter value={v} signed duration={dur} seekToken={seekToken}/> : (v > 0 ? "+" : "") + v.toLocaleString())
+      : "--";
+    const both = pdpEx > 0 && tsEx > 0, tot = both ? pdpEx + tsEx : 0;
+    return (
+      <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:big?3:2}}>
+        <div style={{fontSize:lbl,color:eDC.DIM,fontWeight:600,marginBottom:1}}>Excess Subs vs OTL:</div>
+        <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums"}}><span style={{color:eDC.PDP}}>PewDiePie: </span><span style={{color:eDC.TEXT,fontWeight:700}}>{val(pdpEx)}</span></div>
+        <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums"}}><span style={{color:eDC.TS}}>T-Series: </span><span style={{color:eDC.TEXT,fontWeight:700}}>{val(tsEx)}</span></div>
+        <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums",color:eDC.DIM}}>Diff: {both
+          ? <><span style={{color:"rgba(160,200,255,1)",fontWeight:700}}>{(pdpEx / tot * 100).toFixed(2)}%</span> <span style={{color:"rgba(255,160,160,1)",fontWeight:700}}>{(tsEx / tot * 100).toFixed(2)}%</span></>
+          : <span style={{fontWeight:700}}>--</span>}</div>
+      </div>
+    );
+  };
+
   // LAYOUT: Dashboard Normal/Alt dispatcher - see LAYOUTS.md
   const renderDualDashboard = (props) => props.altLayout ? renderAltDashboard(props) : renderNormalDashboard(props);
 
@@ -7749,11 +7953,11 @@ export default function SocialBladeLive() {
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
             <XAxis dataKey="t" type="number" domain={totXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
-            <YAxis tickFormatter={v=>fmt(v,"subs")} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={totDom} allowDataOverflow ticks={totTicks}/>
-            {!isRTMode && <Tooltip content={<DashTooltip fmtMode="subs" dc={eDC}/>}/>}
+            <YAxis tickFormatter={v=>fmt(v,cfg.totalFmt||"subs")} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={totDom} allowDataOverflow ticks={totTicks}/>
+            {!isRTMode && <Tooltip content={<DashTooltip fmtMode={cfg.totalFmt||"subs"} dc={eDC}/>}/>}
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.totalLineA.key} stroke={cfg.totalLineA.color} strokeWidth={2} dot={false} name={cfg.totalLineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.totalLineB.key} stroke={cfg.totalLineB.color} strokeWidth={2} dot={false} name={cfg.totalLineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
-            {endDots(cfg.totalData, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.totalLineA.key,color:cfg.totalLineA.color,fmtMode:'subs',exact:cfg.exactA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.totalLineB.key,color:cfg.totalLineB.color,fmtMode:'subs',exact:cfg.exactB}]:[])])}
+            {endDots(cfg.totalData, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.totalLineA.key,color:cfg.totalLineA.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.totalLineB.key,color:cfg.totalLineB.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactB}]:[])])}
           </LineChart>
         </ResponsiveContainer>
       </DashChartCard>
@@ -7820,23 +8024,16 @@ export default function SocialBladeLive() {
             <div style={{display:"flex",alignItems:"center",gap:4}}>
               <button onClick={()=>dispatch({type:"TOGGLE_PLAY"})} style={{ background:playing?"#162036":"#162016", color:playing?"#6baee8":"#5dba6e", border:"none", borderRadius:5, padding:"5px 14px", fontWeight:700, fontSize:15, cursor:"pointer", fontFamily:"inherit", minWidth:44 }}>{playing?"⏸":"▶"}</button>
               <button onClick={()=>dispatch({type:"TOGGLE_REVERSE"})} title="Reverse playback" style={{ background:reverse?"#1e2535":"transparent", color:reverse?"#8aaccc":"#777", border:"1px solid "+(reverse?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"5px 10px", fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>{"◀"}</button>
+              {/* Live: jumps to Now and goes to /live. Already there and playing at Now, it leaves /live instead. */}
               <button onClick={()=>{
-                const p = nowToPos();
-                posRef.current = p; setPos(p);
-                clearRT();
-                dispatch({type:"BUMP_SEEK"});
-                dispatch({type:"SET_MODE", mode:"rt"});
-                // Flare wants one coherent live clock; SB / Dashboard want desync + minute snap.
-                if (view === "flare") {
-                  dispatch({type:"SET_DESYNC", value:0});
-                  if (minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
-                } else {
-                  dispatch({type:"SET_DESYNC", value:0.7});
-                  if (!minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
-                }
-                dispatch({type:"SET_MULT", mult:1});
-                dispatch({type:"PLAY"});
-              }} title="Jump to real-world clock time mapped to 2019, switch to RT, play" style={{ background:"transparent", color:"#777", border:"1px solid #1e1e1e", borderRadius:4, padding:"5px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>Now</button>
+                const atNow = playing && Math.abs(posRef.current - nowToPos()) * 3600 <= 5;
+                if (liveUrl && atNow) { window.history.pushState(null, '', _urlFor(_urlHas('alt'), false)); setLiveUrl(false); return; }
+                if (!liveUrl) { window.history.pushState(null, '', _urlFor(_urlHas('alt'), true)); setLiveUrl(true); }
+                goNow();
+                setBarHidden(true);
+              }}
+                title="Jump to real-world clock time mapped to 2019, switch to RT, play, and stay at /live (page loads land on Now). Click again while live to leave /live (page loads resume where you left off)"
+                style={{ background:liveUrl?"#351a1a":"transparent", color:liveUrl?"#f09b9b":"#777", border:"1px solid "+(liveUrl?"#602d2d":"#1e1e1e"), borderRadius:4, padding:"5px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:liveUrl?600:400 }}>Live</button>
             </div>
           </div>
 
@@ -7953,6 +8150,8 @@ export default function SocialBladeLive() {
                     <button key={v} onClick={()=>setDashChanFilter(v)} style={{background:dashChanFilter===v?"#1a2535":"transparent",color:dashChanFilter===v?"#9bbfdf":"#777",border:"none",borderLeft:v==='both'?"none":"1px solid #1e1e1e",padding:"4px 10px",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:dashChanFilter===v?600:400}}>{lbl}</button>
                   ))}
                 </div>}
+                {view==="dashboard" && ALT_SCEN && <button onClick={()=>setShowExcess(v=>!v)} title="Show the Alt Scenario's excess subscribers vs the OTL (real timeline): Alt count minus real count at the same second" style={{ background:showExcess?"#2a1a35":"transparent", color:showExcess?"#c99bf0":"#777", border:"1px solid "+(showExcess?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Show Excess</button>}
+                {view==="dashboard" && ALT_SCEN && <button onClick={()=>setChartsExcess(v=>!v)} title="Every chart (growth windows, totals, gaps) and the Explorer show the excess subs vs the OTL instead" style={{ background:chartsExcess?"#2a1a35":"transparent", color:chartsExcess?"#c99bf0":"#777", border:"1px solid "+(chartsExcess?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit", opacity:chartsExcess&&!exChartsOn?0.6:1 }}>{chartsExcess&&!exChartsOn?"Building…":"Charts Show Excess"}</button>}
                 {view==="dashboard" && <label title="Long Charts Window (days): Sub Gap, Total Subs and 24h Gain use this window; 12h Gain uses half, 48h Gain uses twice" style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:12,color:"#777",marginLeft:4}}>
                   Long Window
                   <input type="number" min={1} step={1} value={dashWin}
@@ -8245,11 +8444,11 @@ export default function SocialBladeLive() {
               </>); })()}
               {sbOvertakeActive ? (() => {
                 const fmtOT = (ri) => {
-                  const pr = Math.round(subsPerMinTable.pdp[ri]), tr = Math.round(subsPerMinTable.ts[ri]);
                   const otGap = tableDisplayPt != null && tableDisplayTt != null ? tableDisplayPt - tableDisplayTt : currentGap;
                   if (otGap != null && otGap <= 0) return "Passed";
-                  if (subsPerMinTable.pdp[ri] == null || subsPerMinTable.ts[ri] == null || otGap == null || tr <= pr) return "";
-                  const otMs = tableTime + (otGap / (tr - pr)) * 60000;
+                  const inMs = overtakeInMs(otGap, subsPerMinTable.pdp[ri], subsPerMinTable.ts[ri]);
+                  if (inMs == null) return "";
+                  const otMs = tableTime + inMs;
                   const off = _getDisplayOffset(otMs);
                   const d = new Date(otMs + off * 3600000);
                   const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()];
@@ -8258,10 +8457,10 @@ export default function SocialBladeLive() {
                 };
                 // Subs both channels have at the predicted crossover ("87.1 M", "90 M"); blank if none predicted.
                 const fmtXSubs = (ri) => {
-                  const pr = Math.round(subsPerMinTable.pdp[ri]), tr = Math.round(subsPerMinTable.ts[ri]);
                   const pt = tableDisplayPt, otGap = pt != null && tableDisplayTt != null ? pt - tableDisplayTt : null;
-                  if (pt == null || otGap == null || otGap <= 0 || subsPerMinTable.pdp[ri] == null || subsPerMinTable.ts[ri] == null || tr <= pr) return "";
-                  const m = Math.round((pt + pr * (otGap / (tr - pr))) / 1e5) / 10;
+                  const inMs = overtakeInMs(otGap, subsPerMinTable.pdp[ri], subsPerMinTable.ts[ri]);
+                  if (inMs == null) return "";
+                  const m = Math.round((pt + Math.round(subsPerMinTable.pdp[ri]) * (inMs / 60000)) / 1e5) / 10;
                   return (Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)) + " M";
                 };
                 const wrapCell = (cs) => ({ ...cs, whiteSpace:"normal", lineHeight:1.2, height:42, maxHeight:42, verticalAlign:"middle", padding:"1px 3px" });
@@ -8494,34 +8693,36 @@ export default function SocialBladeLive() {
           <div style={{ position:"absolute", left:547, top:367, width:V2.sepX - 547, height:1, background:V2.orange }}/>
           <div style={{ position:"absolute", left:V2.sepX, top:0, width:1, height:720, background:V2.orange }}/>
 
-          {/* === MIDDLE COLUMN BOTTOM: PDP/TS gap === */}
+          {/* === MIDDLE COLUMN BOTTOM: PDP/TS gap (TS/PDP = TS - PDP when AltScen is off) === */}
           <div style={{ position:"absolute", left:587, top:381, fontFamily:"Roboto, sans-serif", fontWeight:400, fontSize:13, color:"#fff" }}>1hr Sub Gap</div>
           <div style={{ position:"absolute", left:764, top:381, fontFamily:"Roboto, sans-serif", fontWeight:400, fontSize:13, color:"#fff" }}>1 Day Sub Gap</div>
           <div style={{ position:"absolute", left:570, top:403, width:175, height:75 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={gap1hData} margin={{top:1,right:1,bottom:1,left:1}}>
+              <LineChart data={v2Gap1hData} margin={{top:1,right:1,bottom:1,left:1}}>
                 <XAxis dataKey="t" type="number" domain={[tMinGap1h, gapTime]} allowDataOverflow hide/>
-                <YAxis hide domain={sDomGap1h} allowDataOverflow/>
+                <YAxis hide domain={v2DomGap1h} allowDataOverflow/>
                 <Line type="monotone" dataKey="g" stroke="#daeeff" dot={false} strokeWidth={1.3} isAnimationActive={false}/>
               </LineChart>
             </ResponsiveContainer>
           </div>
           <div style={{ position:"absolute", left:756, top:403, width:175, height:75 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={gap1dData} margin={{top:1,right:1,bottom:1,left:1}}>
+              <LineChart data={v2Gap1dData} margin={{top:1,right:1,bottom:1,left:1}}>
                 <XAxis dataKey="t" type="number" domain={[tMinGap1d, gapTime]} allowDataOverflow hide/>
-                <YAxis hide domain={sDomGap1d} allowDataOverflow/>
+                <YAxis hide domain={v2DomGap1d} allowDataOverflow/>
                 <Line type="monotone" dataKey="g" stroke="#daeeff" dot={false} strokeWidth={1.3} isAnimationActive={false}/>
               </LineChart>
             </ResponsiveContainer>
           </div>
-          <div style={{ position:"absolute", left:550, top:483, fontFamily:"Roboto, sans-serif", fontWeight:500, fontSize:21, color:"#fff" }}>PDP/TS Sub Gap: {gapLabel.replace(/^Sub Gap: /,"")}</div>
+          <div style={{ position:"absolute", left:550, top:483, fontFamily:"Roboto, sans-serif", fontWeight:500, fontSize:21, color:"#fff" }}>{_v2GapFlip
+            ? <>TS/PDP Sub Gap: T-Series: {currentGap != null ? (currentGap <= 0 ? "+" : "−") + Math.abs(currentGap).toLocaleString() : "-"}</>
+            : <>PDP/TS Sub Gap: {gapLabel.replace(/^Sub Gap: /,"")}</>}</div>
           <div style={{ position:"absolute", left:476, top:516, width:469, height:234, overflow:"hidden" }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={histGapData} margin={{top:0,right:10,bottom:20,left:55}}>
+              <LineChart data={v2HistGapData} margin={{top:0,right:10,bottom:20,left:55}}>
                 <CartesianGrid vertical={false} stroke="#D0D0D0"/>
                 <XAxis dataKey="t" type="number" domain={[tMinHist, gapTime]} allowDataOverflow ticks={ticksHist} tickFormatter={fmtHistTick} stroke="#D0D0D0" tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={{stroke:"#D0D0D0",strokeWidth:1}} tickSize={5}/>
-                <YAxis tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={false} tickFormatter={v=>v===0?"0":v.toLocaleString()} domain={histGapAxis.domain} ticks={histGapAxis.ticks} allowDataOverflow/>
+                <YAxis tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={false} tickFormatter={v=>v===0?"0":v.toLocaleString()} domain={v2HistGapAxis.domain} ticks={v2HistGapAxis.ticks} allowDataOverflow/>
                 <Line type="monotone" dataKey="g" stroke={gapBlue} dot={false} strokeWidth={2} isAnimationActive={false}/>
               </LineChart>
             </ResponsiveContainer>
@@ -8705,6 +8906,9 @@ export default function SocialBladeLive() {
         const normalMilestoneEl = <DashMilestone pdpSubs={mileDisplayPt} tsSubs={mileDisplayTt} pdpDaily={predRatePdp} tsDaily={predRateTs} curTime={curTime} dc={eDC} duration={isRTMode?dur:0} seekToken={seekToken} altLayout={false}/>;
         const dashMilestoneEl = normalMilestoneEl;
         if (dashShowCharts) {
+          // Charts Show Excess: live end-dot values from the excess series at curTime.
+          const _exNow = exChartsOn ? excessAt(curTime) : null;
+          const _xp = exChartsOn ? "Excess " : "";
           const dashEl = renderDualDashboard({
             barH,
             chanA:{ icon:pdpIcon, name:"PewDiePie", color:eDC.PDP, display:displayPt,
@@ -8713,7 +8917,7 @@ export default function SocialBladeLive() {
             chanB:{ icon:tsIcon, name:"T-Series", color:eDC.TS, display:displayTt,
               rateLabels:["1 Min","1 Hour","1 Day"],
               rates:[subsPerMinTable.ts[0]!=null?Math.round(subsPerMinTable.ts[0]):null, subsPerMinTable.ts[2]!=null?Math.round(subsPerMinTable.ts[2]*60):null, subsPerMinTable.ts[4]!=null?Math.round(subsPerMinTable.ts[4]*1440):null] },
-            gap:currentGap, leadingIsA:pdpLeading, renderGap:dashRenderGap,
+            gap:currentGap, leadingIsA:pdpLeading,
             diffLabel:"Subscriber Difference", aheadLabel:"Channel Ahead",
             aheadName:pdpLeading?"PewDiePie":"T-Series", leadDuration:fmtLeadDuration(dashLeadMs),
             subsLabel:"Subscribers", showRates:!flareHides("rateDisplays"),
@@ -8725,13 +8929,16 @@ export default function SocialBladeLive() {
               totalData:appMode==='real'?rdDashTotalData:dashTotalData,
               totalLineA:{key:'pt',color:eDC.PDP,name:'PewDiePie'}, totalLineB:{key:'tt',color:eDC.TS,name:'T-Series'},
               totalGapKey:'g',totalGapName:'Gap',
-              totalTitle:'Total Subscribers',gapTitle:'Subscriber Gap',
+              totalTitle:_xp+'Total Subscribers',gapTitle:_xp+'Subscriber Gap',
+              viewPrefix:_xp, totalFmt:exChartsOn?'auto':'subs',
               skTot:'xtot',skDTot:'dtot',skXGapTot:'xgaptot',skDGapTot:'dgaptot',
-              exactA:displayPt, exactB:displayTt, exactGap:currentGap,
+              exactA:_exNow?_exNow.pdp:displayPt, exactB:_exNow?_exNow.ts:displayTt, exactGap:_exNow?_exNow.pdp-_exNow.ts:currentGap,
               valAt:(t)=>{ const v=_altPdpTsAt(t, rtPeriodSec, useNoise); return v ? {a:v.pt, b:v.tt} : null; },
               altData:{ gainData:altGainData, gapData:altGapData, totalData:altTotalData } },
             pairedLabels:dashAltLayout?["1hr Gap","24hr Gap"]:["10min Gap","1hr Gap","24hr Gap"],
-            legendItems:[{color:eDC.PDP,label:"PewDiePie"},{color:eDC.TS,label:"T-Series"},{color:"#e2e5eb",label:"Gap (PDP - TS)"}],
+            legendItems:exChartsOn
+              ? [{color:eDC.PDP,label:"PewDiePie excess"},{color:eDC.TS,label:"T-Series excess"},{color:"#e2e5eb",label:"Excess gap (PDP - TS)"}]
+              : [{color:eDC.PDP,label:"PewDiePie"},{color:eDC.TS,label:"T-Series"},{color:"#e2e5eb",label:"Gap (PDP - TS)"}],
             altLayout:dashAltLayout,
             milestoneEl:dashMilestoneEl,
             timezonesEl:!flareHides("timezones")&&(curPoint?.t||tzDisplayMs)?(<div style={{textAlign:"left",fontSize:16,color:eDC.TEXT,fontVariantNumeric:"tabular-nums"}}>

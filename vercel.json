@@ -4,7 +4,13 @@
   "rewrites": [
     { "source": "/data/bundle.js", "destination": "/api/bundle" },
     { "source": "/alt", "destination": "/index.html" },
-    { "source": "/alt/:path*", "destination": "/:path*" }
+    { "source": "/live", "destination": "/index.html" },
+    { "source": "/alt/live", "destination": "/index.html" },
+    { "source": "/live/alt", "destination": "/index.html" },
+    { "source": "/alt/live/:path*", "destination": "/:path*" },
+    { "source": "/live/alt/:path*", "destination": "/:path*" },
+    { "source": "/alt/:path*", "destination": "/:path*" },
+    { "source": "/live/:path*", "destination": "/:path*" }
   ],
   "functions": {
     "api/bundle.js": {

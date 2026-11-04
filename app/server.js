@@ -22,6 +22,7 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : DATA_ONLY ? 8081 : 
 for (const [bin, packed, startMs] of [
   ['every_second_counts_pvt_u32le.bin', 'every_second_counts_pvt.pvd.gz', Date.UTC(2018, 9, 17, 4, 0, 0)],
   ['scenario-pdp-ts.bin', 'scenario-pdp-ts.pvd.gz', undefined],   // NPT1 export: start is in its header
+  ['real-pdp-ts.bin', 'real-pdp-ts.pvd.gz', undefined],           // real-data extension (May 1 - Jun 30), NPT1
 ]) {
   try {
     const r = packIfStale(path.join(ROOT, 'data', bin), path.join(ROOT, 'data', packed), startMs);
@@ -103,6 +104,11 @@ function buildDataBundle() {
     })(),
     FTVD_REAL: (() => {
       try { return parseSimpleSheet(read('FTV Daily Real.csv')); }
+      catch (e) { return []; }
+    })(),
+    // Real-data extension audits (May 1 - Jun 30), same CSV format as the Scenario export's.
+    EXT_AUDITS: (() => {
+      try { return parseAltAudits(read('real-pdp-ts-audits.csv')); }
       catch (e) { return []; }
     })(),
     // Alt Scenario datasets (used only when the AltScen flag is on).
@@ -228,8 +234,8 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // /alt (Alt Scenario) serves the same app; /alt/<file> maps to /<file>.
-  const pageUrl = /^\/alt(\/|$)/.test(url) ? (url.slice(4) || '/') : url;
+  // /alt and /live (in any combination) serve the same app; /alt/<file> maps to /<file>.
+  const pageUrl = url.replace(/^(\/(alt|live))+(?=\/|$)/, '') || '/';
   const filePath = path.join(ROOT, decodeURIComponent(pageUrl === '/' ? 'index.html' : pageUrl));
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
