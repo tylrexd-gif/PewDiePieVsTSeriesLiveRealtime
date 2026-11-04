@@ -1838,12 +1838,11 @@ const MULT_MIN = 0.001;
 const MULT_MAX = 1000;
 // Single source of truth for the RT cadence: the gap between value updates (the
 // tick interval) AND the odometer roll duration must be identical, or the roll
-// can't keep up with the ticks. periodSec is the per-tick interval at 1x (in
-// seconds); above 1x the loop fires ~1 sim-sec per tick (1000/em).
+// can't keep up with the ticks. periodSec is the update interval in sim-seconds at
+// every speed, so the loop fires every periodSec/em real seconds (10ms floor).
 const rtRollDuration = (periodSec, em) => {
   const m = em > 0 ? em : 1;
-  const baseMs = periodSec * 1000;
-  return m <= 1 ? baseMs / m : Math.max(10, 1000 / m);
+  return Math.max(10, periodSec * 1000 / m);
 };
 
 const initialPlayback = { playing:false, reverse:false, speedMode:"rt", mult:1, dyn:false, desync:0, seekToken:0, minuteSnap:false };
@@ -5514,13 +5513,14 @@ export default function SocialBladeLive() {
   // STARTUP goto: once loading has finished, jump to Now and start playing - so the
   // seconds spent loading don't leave playback behind the real-world clock.
   const didStartGoto = useRef(false);
+  const resumePlayingRef = useRef(_ss.playing);   // read at mount: the save effect overwrites _ss.playing before the data loads
   useEffect(() => {
     if (!realDataReady) return;
     window._dismissLoading?.();
     if (didStartGoto.current) return;
     didStartGoto.current = true;
     // Resuming the last visit: stay where the user was; play only if it was playing.
-    if (KEEP_STATE_ON_LOAD) { if (_ss.playing) dispatch({type:"PLAY"}); return; }
+    if (KEEP_STATE_ON_LOAD) { if (resumePlayingRef.current) dispatch({type:"PLAY"}); return; }
     requestAnimationFrame(() => {
       const p = nowToPos();
       posRef.current = p; setPos(p);
@@ -6156,20 +6156,9 @@ export default function SocialBladeLive() {
   // - RT mode interval -
   useEffect(() => {
     if (!isRTSpeedMode(speedMode) || !playing) return;
-    const periodSec = rtInterval;
-    const baseMs = rtInterval * 1000;
-    // At 1x, advance one full RT period per tick (unchanged). At higher mult,
-    // aim for 1 sim-sec per tick so the clock display ticks every second instead
-    // of jumping in period-sec increments. actualMs shrinks accordingly to keep
-    // the overall sim-rate equal to mult. The 10ms floor is the practical lower
-    // bound - at mult=100 it lets the tick fire every 10ms with advanceSec=1
-    // (one sim-sec per tick), and only past mult=100 does advanceSec grow.
+    // One tick per rtInterval sim-seconds at any speed; each tick advances by real
+    // elapsed time x mult, so the overall sim-rate stays equal to mult.
     const getTickMs = () => rtRollDuration(rtInterval, effectiveMultRef.current);
-    const getAdvanceSec = (tickMs) => {
-      const em = effectiveMultRef.current;
-      if (em <= 1) return baseMs / 1000;
-      return tickMs * em / 1000;
-    };
     const gauss = () => Math.sqrt(-2*Math.log(Math.random()+1e-10))*Math.cos(2*Math.PI*Math.random());
 
     // Seed display at effect setup from binary.
