@@ -1208,6 +1208,38 @@ const get6HourTicks = (tMin, tMax) => {
   return ticks;
 };
 
+// SocialBlade's live chart axis: Highcharts datetime with tickPixelInterval 150. Same tick
+// choice as Highcharts 7, floored at 1s (its minTickInterval is the 1s point spacing).
+const SB_TICK_UNITS = [[1000, [1, 2, 5, 10, 15, 30]], [60000, [1, 2, 5, 10, 15, 30]], [3600000, [1, 2, 3, 4, 6, 8, 12]],
+  [DAY_MS, [1, 2]], [7 * DAY_MS, [1, 2]], [30 * DAY_MS, [1, 2, 3, 4, 6]]];
+const getSbTimeTicks = (tMin, tMax, plotW) => {
+  const want = Math.max(1000, (tMax - tMin) * 150 / plotW);
+  let unit, mults;
+  for (let i = 0; i < SB_TICK_UNITS.length; i++) {
+    [unit, mults] = SB_TICK_UNITS[i];
+    const next = SB_TICK_UNITS[i + 1];
+    if (!next || want <= (unit * mults[mults.length - 1] + next[0]) / 2) break;
+  }
+  let count = mults[mults.length - 1];
+  for (let i = 0; i < mults.length - 1; i++) {
+    if (want / unit <= (mults[i] + mults[i + 1]) / 2) { count = mults[i]; break; }
+  }
+  // Walk the displayed clock, so day ticks stay on local midnight across a DST change.
+  const step = count * unit, off = _getDisplayOffset(tMin) * 3600000;
+  const isMonth = unit === 30 * DAY_MS;
+  const anchor = unit === 7 * DAY_MS ? 4 * DAY_MS : 0;   // weeks start on Monday (epoch day 0 is a Thursday)
+  const start = new Date(tMin + off);
+  let month = start.getUTCMonth() - start.getUTCMonth() % count;
+  let loc = isMonth ? Date.UTC(start.getUTCFullYear(), month, 1) : Math.ceil((tMin + off - anchor) / step) * step + anchor;
+  const ticks = [];
+  while (loc <= tMax + off + HOUR_MS) {
+    const t = loc - _getDisplayOffset(loc - off) * 3600000;
+    if (t >= tMin && t <= tMax) ticks.push(t);
+    loc = isMonth ? Date.UTC(start.getUTCFullYear(), month += count, 1) : loc + step;
+  }
+  return ticks.length ? ticks : [tMin];   // an empty list would make recharts invent its own ticks
+};
+
 const get15MinTicks = (tMin, tMax) => {
   const d = new Date(tMin);
   const m = d.getUTCMinutes();
@@ -1215,67 +1247,6 @@ const get15MinTicks = (tMin, tMax) => {
   if (d.getTime() <= tMin) d.setUTCMinutes(d.getUTCMinutes() + 15);
   const ticks = [];
   while (d.getTime() <= tMax) { ticks.push(d.getTime()); d.setUTCMinutes(d.getUTCMinutes() + 15); }
-  return ticks;
-};
-
-// Adaptive date ticks: picks interval to show ~4-8 ticks regardless of data span
-const getAdaptiveDateTicks = (tMin, tMax) => {
-  const spanMs = tMax - tMin;
-  const spanHours = spanMs / HOUR_MS;
-  const spanDays = spanMs / DAY_MS;
-  const ticks = [];
-  let etOff = _getDisplayOffset(tMin) * 3600000;
-  const d = new Date(tMin + etOff);
-
-  if (spanHours <= 3) {
-    // Every 30 min - minute marks are timezone-invariant; offset stays constant over 3h
-    d.setUTCMinutes(Math.ceil(d.getUTCMinutes() / 30) * 30, 0, 0);
-    while (d.getTime() - etOff <= tMax) { ticks.push(d.getTime() - etOff); d.setUTCMinutes(d.getUTCMinutes() + 30); }
-  } else if (spanHours <= 12) {
-    // Every 2 hours in ET
-    d.setUTCMinutes(0, 0, 0);
-    d.setUTCHours(Math.ceil(d.getUTCHours() / 2) * 2);
-    while (true) {
-      const tEt = d.getTime();
-      const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
-      if (realT > tMax) break;
-      ticks.push(realT);
-      etOff = _getDisplayOffset(realT) * 3600000;
-      d.setUTCHours(d.getUTCHours() + 2);
-    }
-  } else if (spanHours <= 48) {
-    // Every 6 hours in ET
-    d.setUTCMinutes(0, 0, 0);
-    d.setUTCHours(Math.ceil(d.getUTCHours() / 6) * 6);
-    while (true) {
-      const tEt = d.getTime();
-      const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
-      if (realT > tMax) break;
-      ticks.push(realT);
-      etOff = _getDisplayOffset(realT) * 3600000;
-      d.setUTCHours(d.getUTCHours() + 6);
-    }
-  } else {
-    // ET day boundaries
-    const interval = spanDays <= 9 ? 1 : spanDays <= 18 ? 2 : spanDays <= 36 ? 4 : spanDays <= 63 ? 7 : 14;
-    d.setUTCHours(0, 0, 0, 0);
-    if (d.getTime() < tMin + etOff) d.setUTCDate(d.getUTCDate() + 1);
-    // Snap to a fixed anchor grid so the even/odd day pattern never shifts
-    // as the view window moves. Anchor: 2018-10-17 in ET-day space (day 0).
-    if (interval > 1) {
-      const REF = Date.UTC(2018, 9, 17);
-      const rem = ((Math.round((d.getTime() - REF) / DAY_MS) % interval) + interval) % interval;
-      if (rem !== 0) d.setUTCDate(d.getUTCDate() + (interval - rem));
-    }
-    while (true) {
-      const tEt = d.getTime();
-      const realT = tEt - _getDisplayOffset(tEt - etOff) * 3600000;
-      if (realT > tMax) break;
-      ticks.push(realT);
-      etOff = _getDisplayOffset(realT) * 3600000;
-      d.setUTCDate(d.getUTCDate() + interval);
-    }
-  }
   return ticks;
 };
 
@@ -4255,18 +4226,28 @@ const endDots = (data, tCur, specs) => {
       const xScale = Object.values(xAxisMap)[0]?.scale;
       const yScale = Object.values(yAxisMap)[0]?.scale;
       if (!xScale || !yScale) return null;
+      const placed = pts.map(p => ({ ...p, cx: xScale(p.xVal), cy: yScale(p.val) }))
+        .filter(p => p.cx != null && p.cy != null && !isNaN(p.cx) && !isNaN(p.cy))
+        .sort((a, b) => a.cy - b.cy);
+      // Labels too close to read: spread them evenly around their dots (the dots stay on the
+      // line), kept inside the plot area.
+      const minGap = 15;
+      placed.forEach((p, i) => { p.ly = i ? Math.max(p.cy, placed[i-1].ly + minGap) : p.cy; });
+      if (placed.length) {
+        const [yA, yB] = yScale.range(), yTop = Math.min(yA, yB), yBot = Math.max(yA, yB);
+        let shift = placed.reduce((s, p) => s + p.ly - p.cy, 0) / placed.length;
+        shift = Math.max(shift, placed[placed.length-1].ly - yBot);
+        shift = Math.min(shift, placed[0].ly - yTop);
+        for (const p of placed) p.ly -= shift;
+      }
       return (
         <g style={{pointerEvents:'none'}}>
-          {[...pts].sort((a,b) => a.val - b.val).map(({key, xVal, val, displayVal, color, fmtMode}) => {
-            const cx = xScale(xVal), cy = yScale(val);
-            if (cx==null||cy==null||isNaN(cx)||isNaN(cy)) return null;
-            return (
-              <g key={key}>
-                <circle cx={cx} cy={cy} r={4} fill={color} stroke="#ffffff" strokeWidth={1.5}/>
-                <text x={cx+10} y={cy+4} fill={color} fontSize={11} fontFamily="Inter,system-ui,sans-serif" fontWeight={600}>{fmt(displayVal,fmtMode)}</text>
-              </g>
-            );
-          })}
+          {[...placed].sort((a,b) => a.val - b.val).map(({key, val, displayVal, color, fmtMode, cx, cy, ly}) => (
+            <g key={key}>
+              <circle cx={cx} cy={cy} r={4} fill={color} stroke="#ffffff" strokeWidth={1.5}/>
+              <text x={cx+10} y={ly+4} fill={color} fontSize={11} fontFamily="Inter,system-ui,sans-serif" fontWeight={600}>{fmt(displayVal,fmtMode)}</text>
+            </g>
+          ))}
         </g>
       );
     }}/>
@@ -4304,6 +4285,9 @@ const _exploreCss = `
   background: rgba(30,33,48,0.92); border: 1px solid #3a4258; color: #c8cdd6; pointer-events: none;
   opacity: 0; transition: opacity 120ms ease; white-space: nowrap; }
 .dash-explore:hover .dash-explore-hint { opacity: 1; }
+.dash-card-controls { opacity: 0; transition: opacity 120ms ease; }
+.dash-card:hover .dash-card-controls, .dash-card-controls:has(:focus-visible) { opacity: 1; }
+@media (hover: none) { .dash-card-controls { opacity: 1; } }
 `;
 if (typeof document !== "undefined" && !document.getElementById("dash-explore-css")) {
   const s = document.createElement("style");
@@ -4318,11 +4302,11 @@ const DashChartCard = React.memo(({title,children,dc,controls,onExpand}) => {
     onExpand(e.currentTarget.getBoundingClientRect());
   } : undefined;
   return (
-  <div onClick={onClick} className={onExpand ? "dash-explore" : undefined} style={{background:d.CARD,border:"1px solid "+d.BORDER,borderRadius:10,padding:"14px 10px 6px 10px",flex:1,minWidth:0,minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+  <div onClick={onClick} className={onExpand ? "dash-card dash-explore" : "dash-card"} style={{background:d.CARD,border:"1px solid "+d.BORDER,borderRadius:10,padding:"14px 10px 6px 10px",flex:1,minWidth:0,minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
     {onExpand && <div className="dash-explore-hint">Click to explore</div>}
     <div style={{padding:"0 6px",marginBottom:6,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
       <span style={{color:d.TEXT,fontWeight:700,fontSize:14,letterSpacing:"0.02em"}}>{title}</span>
-      {controls && <div style={{display:"flex",alignItems:"center",gap:3}}>{controls}</div>}
+      {controls && <div className="dash-card-controls" style={{display:"flex",alignItems:"center",gap:3}}>{controls}</div>}
     </div>
     <div style={{flex:1,minHeight:0}}>{children}</div>
   </div>
@@ -5843,19 +5827,18 @@ export default function SocialBladeLive() {
     return pts;
   }, [tMinGap1h, gapTime, realDataReady]);
 
-  // Power-of-2 step in ms, floored at the mode's natural minimum
-  // (rtPeriodSec*1000 in RT, 60000 in 1m). Stable across small span
+  // Power-of-2 step in ms, sampled by the data actually in the window
+  // (down to its 1s resolution), at any speed. Stable across small span
   // changes - only "shifts" at log2 boundaries (e.g. when the span
   // doubles), at which point the bucket changes and the chart
   // re-quantizes once. Within a bucket every chart sample sits at the
   // same absolute timestamp render after render, so the line shape
   // doesn't morph; the right edge just advances.
   const _gap1dSpan = Math.max(0, gapTime - tMinGap1d);
-  const _gap1dModeFloor = (speedMode === "1m") ? 60000 : (rtPeriodSec * 1000);
-  const _gap1dRawStep = Math.max(_gap1dModeFloor, _gap1dSpan / 1500);
+  const _gap1dRawStep = Math.max(1000, _gap1dSpan / 1500);
   const _gap1dStep = Math.pow(2, Math.ceil(Math.log2(Math.max(1, _gap1dRawStep))));
   const _gap1dPeriodSec = Math.max(rtPeriodSec, Math.round(_gap1dStep / 1000));
-  const _gap1dQuantum = Math.max(_gap1dModeFloor, _gap1dStep / 8);
+  const _gap1dQuantum = Math.max(rtPeriodSec * 1000, _gap1dStep / 8);
   const _gap1dKey = Math.floor(gapTime / _gap1dQuantum);
 
   const gap1dData = useMemo(() => {
@@ -5874,11 +5857,11 @@ export default function SocialBladeLive() {
     ? Math.max(REAL_DATA_START_MS, gapTime - sbGapWin * DAY_MS)
     : RAW[histStartIdx].t;
   const _histSpan = Math.max(0, gapTime - _histTStart);
-  const _histModeFloor = (speedMode === "1m") ? 60000 : (rtPeriodSec * 1000);
-  const _histRawStep = Math.max(_histModeFloor, _histSpan / 4000);
+  // Sample by the data actually in the window (down to its 1s resolution), at any speed.
+  const _histRawStep = Math.max(1000, _histSpan / 4000);
   const _histStep = Math.pow(2, Math.ceil(Math.log2(Math.max(1, _histRawStep))));
   const _histPeriodSec = Math.max(rtPeriodSec, Math.round(_histStep / 1000));
-  const _histQuantum = Math.max(_histModeFloor, _histStep / 8);
+  const _histQuantum = Math.max(rtPeriodSec * 1000, _histStep / 8);
   const _histKey = Math.floor(gapTime / _histQuantum);
 
   const histGapData = useMemo(() => {
@@ -5926,7 +5909,7 @@ export default function SocialBladeLive() {
   const _domExtraCP = _rdCurRef ?? curPoint;
 
   const domGap1d  = useMemo(() => getRange(gap1dData,  ["g"], tMinGap1d, gapTime, _domExtraCP), [gap1dData,  tMinGap1d, gapTime, _domExtraCP]);
-  const ticksHist = useMemo(() => getAdaptiveDateTicks(tMinHist, gapTime), [tMinHist, gapTime, dispTz]);
+  const ticksHist = useMemo(() => getSbTimeTicks(tMinHist, gapTime, 497), [tMinHist, gapTime, dispTz]);
   // Round Y-axis for the historical gap chart (V1 + V2 PDP/TS share this data).
   const histGapAxis = roundGapAxis(histGapData, _domExtraCP?.g);
 
@@ -5979,8 +5962,8 @@ export default function SocialBladeLive() {
     [_histTStart, _histKey, _histQuantum, _histStep, useNoise, realDataReady]);
   const musicTsHistGapData = useMemo(() => _musicGapRange('ts', _histTStart, _histKey * _histQuantum, _histStep, false),
     [_histTStart, _histKey, _histQuantum, _histStep, useNoise, realDataReady]);
-  const ticksPdp1h = useMemo(() => get15MinTicks(tMinPdp1h, pdpTime), [tMinPdp1h, pdpTime]);
-  const ticksTs1h  = useMemo(() => get15MinTicks(tMinTs1h, tsTime),  [tMinTs1h, tsTime]);
+  const ticksPdp1h = useMemo(() => getSbTimeTicks(tMinPdp1h, pdpTime, 521), [tMinPdp1h, pdpTime, dispTz]);
+  const ticksTs1h  = useMemo(() => getSbTimeTicks(tMinTs1h, tsTime, 541),  [tMinTs1h, tsTime, dispTz]);
   const ticksGap1h = useMemo(() => get15MinTicks(tMinGap1h, gapTime), [tMinGap1h, gapTime]);
 
   // effectiveMult: mult scaled by dyn speed. Declared as `let` so it can be
@@ -6619,23 +6602,17 @@ export default function SocialBladeLive() {
   }, [menuOpen, barHidden, ctrlBarH]);
 
   // Chart tick formatters — all display in Eastern Time (same as Raleigh clock)
-  const fmt1hTick = (ts) => {
+  const fmtSbTick = (ts) => {
     const d = new Date(ts + _getDisplayOffset(ts) * 3600000);
-    const h = d.getUTCHours(), m = d.getUTCMinutes();
-    if (h === 0 && m === 0) return d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"});
-    return String(h).padStart(2,"0") + ":" + String(m).padStart(2,"0");
-  };
-  const fmtHistTick = (ts) => {
-    const d = new Date(ts + _getDisplayOffset(ts) * 3600000);
-    const spanHours = (curTime - tMinHist) / HOUR_MS;
-    const dateFmt = d.getUTCDate()+". "+d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short"});
-    if (spanHours <= 12) return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0");
-    if (spanHours <= 48) {
-      const h = d.getUTCHours();
-      if (h === 0) return dateFmt;
-      return String(h).padStart(2,"0")+":00";
+    const h = d.getUTCHours(), m = d.getUTCMinutes(), s = d.getUTCSeconds();
+    // Highcharts labels a tick by the largest unit it lands on: year, month, day, minute, else second.
+    if (h === 0 && m === 0 && s === 0) {
+      const mon = d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short"});
+      if (d.getUTCDate() !== 1) return d.getUTCDate()+". "+mon;
+      return d.getUTCMonth() === 0 ? String(d.getUTCFullYear()) : mon+" '"+String(d.getUTCFullYear()).slice(2);
     }
-    return dateFmt;
+    const hm = String(h).padStart(2,"0") + ":" + String(m).padStart(2,"0");
+    return s ? hm + ":" + String(s).padStart(2,"0") : hm;
   };
 
   // - Dashboard data -
@@ -7143,7 +7120,9 @@ export default function SocialBladeLive() {
     const pointAt = (t) => {
       const now = _altPdpTsAt(t);
       const past = _altPdpTsAt(t - lbMs);
-      if (!now || !past) return null;
+      if (!now) return null;
+      // Before the lookback has data: no gain yet, but the gap charts still read this point.
+      if (!past) return { t, gp: null, gt: null, pt: now.pt, tt: now.tt, g: now.pt - now.tt, gap: now.pt - now.tt };
       let gp = now.pt - past.pt, gt = now.tt - past.tt;
       if (strip) {
         gp -= chartCumAudit(t, "pdp") - chartCumAudit(t - lbMs, "pdp");
@@ -7160,10 +7139,19 @@ export default function SocialBladeLive() {
       };
     };
     const pts = [];
-    const tFirst = Math.ceil(bucket.tMin / bucket.step) * bucket.step;
+    // 1min charts: one extra minute before the window (off-screen, clipped by the x-domain),
+    // so "1min avg" has its full trailing 60s at the left edge.
+    const lead = lbMs === 60000 ? 60000 : 0;
+    const tFirst = Math.ceil((bucket.tMin - lead) / bucket.step) * bucket.step;
     for (let t = tFirst; t < tEnd; t += bucket.step) {
       const p = pointAt(t);
       if (p) pts.push(p);
+    }
+    // First second with a full lookback, so the gain line starts exactly at its left bound.
+    const tReady = REAL_DATA_START_MS + lbMs;
+    if (tReady >= tFirst && tReady < tEnd) {
+      const at = pts.findIndex(p => p.t >= tReady), p = pointAt(tReady);
+      if (p && at >= 0 && pts[at].t !== tReady) pts.splice(at, 0, p);
     }
     const endPoint = pointAt(tEnd);
     if (endPoint && (!pts.length || pts[pts.length - 1].t !== tEnd)) pts.push(endPoint);
@@ -7509,7 +7497,16 @@ export default function SocialBladeLive() {
       }
       if (n) { _exGainA = sA / n; _exGainB = sB / n; }
     }
-    const tMin = Math.max(curTime - span * HOUR_MS, cfg.dataStart);
+    // Left bound: the first second this chart has a value for (the lookback, plus the
+    // 60s average in 1min avg mode), or the normal window once that has filled.
+    const histMs = lbMs + (avg1m ? 60000 : 0);
+    const tWin = curTime - span * HOUR_MS;
+    const tMin = Math.min(curTime, Math.max(tWin, cfg.dataStart + histMs));
+    // While the window is still filling, run the line up to the live value.
+    const gdLive = (tWin < tMin && _exGainA != null && _exGainB != null)
+      ? [...gd.filter(d => d.t < curTime), { t: curTime, [cfg.lineA.key]: _exGainA, [cfg.lineB.key]: _exGainB }]
+      : gd;
+    const insufficient = !!realDataReady && gdLive.filter(d => d.t >= tMin && d.t <= curTime && (d[cfg.lineA.key] != null || d[cfg.lineB.key] != null)).length < 2;
     const auditLines = (auditChans && lb <= 1)
       ? (appMode === 'real'
           ? (exChartsOn ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a => a.ms >= tMin && a.ms <= curTime && auditChans.some(m => m.ch === a.channel))
@@ -7517,7 +7514,7 @@ export default function SocialBladeLive() {
       : [];
     const xDom = [tMin, curTime];
     const _chanKeys = dashChanFilter==='pdp'?[cfg.lineA.key]:dashChanFilter==='ts'?[cfg.lineB.key]:[cfg.lineA.key,cfg.lineB.key];
-    const dom = dashGetRange(gd, _chanKeys, curTime, tMin);
+    const dom = dashGetRange(gdLive, _chanKeys, curTime, tMin);
     const yTicks = niceTicks(dom, true);
     const edgeBufG = (curTime - tMin) * 0.1;
     const allMidnightsG = thinMidnights(getMidnights(tMin, curTime), 6);
@@ -7549,9 +7546,12 @@ export default function SocialBladeLive() {
       </React.Fragment>
     );
     return (
-      <DashChartCard title={(cfg.viewPrefix || "") + ((dashGainPerMin && lbMins >= 1) ? cfg.gainLabels[effectiveCi].replace("Gain", "avg") : cfg.gainLabels[effectiveCi])} dc={eDC} controls={cardControls} onExpand={openGainExplorer(Math.round(lb * 3600), tMin)}>
+      <DashChartCard title={(cfg.viewPrefix || "") + ((dashGainPerMin && lbMins >= 1) ? cfg.gainLabels[effectiveCi].replace("Gain", "avg") : cfg.gainLabels[effectiveCi])} dc={eDC} controls={cardControls} onExpand={insufficient ? undefined : openGainExplorer(Math.round(lb * 3600), tMin)}>
+        {insufficient ? (
+          <div style={{height:h,display:"flex",alignItems:"center",justifyContent:"center",color:eDC.DIM,fontSize:13,fontFamily:"Inter,system-ui,sans-serif"}}>Insufficient history</div>
+        ) : (
         <ResponsiveContainer width="100%" height={h}>
-          <LineChart data={gd} margin={{top:4,right:70,bottom:0,left:0}}>
+          <LineChart data={gdLive} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
             <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksG} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {allMidnightsG.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
@@ -7561,9 +7561,10 @@ export default function SocialBladeLive() {
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1}/>
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.lineA.key} stroke={cfg.lineA.color} strokeWidth={1.8} dot={false} name={cfg.lineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.lineB.key} stroke={cfg.lineB.color} strokeWidth={1.8} dot={false} name={cfg.lineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
-            {endDots(gd, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.lineA.key,color:cfg.lineA.color,exact:_exGainA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.lineB.key,color:cfg.lineB.color,exact:_exGainB}]:[])])}
+            {endDots(gdLive, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.lineA.key,color:cfg.lineA.color,exact:_exGainA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.lineB.key,color:cfg.lineB.color,exact:_exGainB}]:[])])}
           </LineChart>
         </ResponsiveContainer>
+        )}
       </DashChartCard>
     );
   };
@@ -7572,8 +7573,18 @@ export default function SocialBladeLive() {
   const renderDashGapChart = (ci, gapLabel, h, cfg) => {
     const [lb, span] = gainCharts[ci];
     const lbMs = Math.round(lb * HOUR_MS);
-    const gd = cfg.gainData[ci];
+    let gd = cfg.gainData[ci];
     const tMin = Math.max(curTime - span * HOUR_MS, cfg.dataStart);
+    // Window still at the very start of the data: pin the line to the first second and
+    // the live value, so it draws from second 1 rather than the first sample.
+    if (tMin === cfg.dataStart && cfg.valAt) {
+      const v0 = cfg.valAt(tMin), v1 = cfg.valAt(curTime);
+      gd = [
+        ...(v0 ? [{ t: tMin, gap: v0.a - v0.b }] : []),
+        ...gd.filter(d => d.t > tMin && d.t < curTime),
+        ...(v1 && curTime > tMin ? [{ t: curTime, gap: v1.a - v1.b }] : []),
+      ];
+    }
     const xDom = [tMin, curTime];
     const dom = dashGetRange(gd, ["gap"], curTime, tMin);
     const yTicks = niceTicks(dom, true);
@@ -8361,7 +8372,7 @@ export default function SocialBladeLive() {
         <div style={{ position:"absolute", left:0, top:252, width:541, height:231, overflow:"hidden", background:`linear-gradient(to bottom, ${SB_CHART_BG} calc(100% - 80px), ${SB_AXIS_BG} calc(100% - 80px))` }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={pdp1hData} margin={{top:5,right:10,bottom:20,left:10}}>
-              <XAxis dataKey="t" type="number" domain={[tMinPdp1h, pdpTime]} allowDataOverflow ticks={ticksPdp1h} tickFormatter={fmt1hTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
+              <XAxis dataKey="t" type="number" domain={[tMinPdp1h, pdpTime]} allowDataOverflow ticks={ticksPdp1h} tickFormatter={fmtSbTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
               <YAxis hide domain={[sDomPdp1h[0]-(sDomPdp1h[1]-sDomPdp1h[0])*0.22, sDomPdp1h[1]]} allowDataOverflow/>
               <Line type="monotone" dataKey="pt" stroke={salmon} dot={false} strokeWidth={3} isAnimationActive={false}/>
             </LineChart>
@@ -8372,7 +8383,7 @@ export default function SocialBladeLive() {
         <div style={{ position:"absolute", left:_sbColR, top:256, width:561, height:231, overflow:"hidden", background:`linear-gradient(to bottom, ${SB_CHART_BG} calc(100% - 80px), ${SB_AXIS_BG} calc(100% - 80px))` }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={ts1hData} margin={{top:5,right:10,bottom:20,left:10}}>
-              <XAxis dataKey="t" type="number" domain={[tMinTs1h, tsTime]} allowDataOverflow ticks={ticksTs1h} tickFormatter={fmt1hTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
+              <XAxis dataKey="t" type="number" domain={[tMinTs1h, tsTime]} allowDataOverflow ticks={ticksTs1h} tickFormatter={fmtSbTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
               <YAxis hide domain={[sDomTs1h[0]-(sDomTs1h[1]-sDomTs1h[0])*0.22, sDomTs1h[1]]} allowDataOverflow/>
               <Line type="monotone" dataKey="tt" stroke={salmon} dot={false} strokeWidth={3} isAnimationActive={false}/>
             </LineChart>
@@ -8445,7 +8456,7 @@ export default function SocialBladeLive() {
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={histGapData} margin={{top:5,right:15,bottom:20,left:60}}>
               <CartesianGrid vertical={false} stroke={sbDark?"#D0D0D0":"#ddd"}/>
-              <XAxis dataKey="t" type="number" domain={[tMinHist, gapTime]} allowDataOverflow ticks={ticksHist} tickFormatter={fmtHistTick} stroke={sbDark?"#D0D0D0":"#ddd"} tick={{fontSize:10,fontFamily:"Lucida Sans Unicode",fill:sbDark?lightGray:"#777"}} axisLine={false} tickLine={{stroke:sbDark?"#D0D0D0":"#ddd",strokeWidth:1}} tickSize={6}/>
+              <XAxis dataKey="t" type="number" domain={[tMinHist, gapTime]} allowDataOverflow ticks={ticksHist} tickFormatter={fmtSbTick} stroke={sbDark?"#D0D0D0":"#ddd"} tick={{fontSize:10,fontFamily:"Lucida Sans Unicode",fill:sbDark?lightGray:"#777"}} axisLine={false} tickLine={{stroke:sbDark?"#D0D0D0":"#ddd",strokeWidth:1}} tickSize={6}/>
               <YAxis tick={{fontSize:10,fontFamily:"Lucida Sans Unicode",fill:sbDark?lightGray:"#777"}} axisLine={false} tickLine={false} tickFormatter={v=>v===0?"0":v.toLocaleString()} domain={histGapAxis.domain} ticks={histGapAxis.ticks} allowDataOverflow/>
               <Line type="monotone" dataKey="g" stroke={gapBlue} dot={false} strokeWidth={2} isAnimationActive={false}/>
             </LineChart>
@@ -8457,16 +8468,16 @@ export default function SocialBladeLive() {
 
         {/* = Subs/Min Table (with milestone prediction rows) = */}
         <div style={{ position:"absolute", left:0, top:456, width:747, height:131, zIndex:10 }}>
-          <table style={{ borderCollapse:"collapse", fontFamily:"Times New Roman, serif", fontSize:15, color:sbDark?"#fff":"#000", tableLayout:"fixed" }}>
+          <table style={{ borderCollapse:"collapse", fontFamily:"Times New Roman, serif", fontSize:15, color:sbDark?"#fff":"#000", tableLayout:"auto" }}>
             <thead><tr>
-              {["Avg\nSubs/Min","1 min\navg","5 min\navg","1 hr\navg","12 hr\navg","1 day\navg","2 day\navg","3 day\navg","5 day\navg","7 day\navg","14 day\navg","30 day\navg"].map((h,i)=>
-                <th key={i} style={{...cellStyle(i===0?83:60,37,"center",sbDark),fontWeight:"bold",whiteSpace:"pre-line",lineHeight:1.2,verticalAlign:"middle",fontSize:15}}>{h}</th>
+              {["Avg Subs/Min","1 min avg","5 min avg","1 hr avg","12 hr avg","1 day avg","2 day avg","3 day avg","5 day avg","7 day avg","14 day avg","30 day avg"].map((h,i)=>
+                <th key={i} style={{...cellStyle(undefined,37,"center",sbDark),fontWeight:"bold",whiteSpace:"normal",lineHeight:1.2,verticalAlign:"middle",fontSize:15}}>{h}</th>
               )}
             </tr></thead>
             <tbody>
               {(() => { const lbs=[1/60,5/60,1,12,24,48,72,120,168,336,720]; return (<>
-              <tr>{["PewDiePie",...subsPerMinTable.pdp.map((v,i)=>fmtSpm(v,lbs[i]))].map((v,i)=><td key={i} style={cellStyle(i===0?83:60,21,"left",sbDark)}>{v}</td>)}</tr>
-              <tr>{["T-Series",...subsPerMinTable.ts.map((v,i)=>fmtSpm(v,lbs[i]))].map((v,i)=><td key={i} style={cellStyle(i===0?83:60,21,"left",sbDark)}>{v}</td>)}</tr>
+              <tr>{["PewDiePie",...subsPerMinTable.pdp.map((v,i)=>fmtSpm(v,lbs[i]))].map((v,i)=><td key={i} style={cellStyle(undefined,21,"left",sbDark)}>{v}</td>)}</tr>
+              <tr>{["T-Series",...subsPerMinTable.ts.map((v,i)=>fmtSpm(v,lbs[i]))].map((v,i)=><td key={i} style={cellStyle(undefined,21,"left",sbDark)}>{v}</td>)}</tr>
               </>); })()}
               {sbOvertakeActive ? (() => {
                 const fmtOT = (ri) => {
@@ -8489,30 +8500,30 @@ export default function SocialBladeLive() {
                   const m = Math.round((pt + Math.round(subsPerMinTable.pdp[ri]) * (inMs / 60000)) / 1e5) / 10;
                   return (Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)) + " M";
                 };
-                const wrapCell = (cs) => ({ ...cs, whiteSpace:"normal", lineHeight:1.2, height:42, maxHeight:42, verticalAlign:"middle", padding:"1px 3px" });
+                const wrapCell = (cs) => ({ ...cs, whiteSpace:"normal", lineHeight:"1.3", verticalAlign:"middle" });
                 return (<>
                   <tr>
-                    <td colSpan={5} style={wrapCell({...cellStyle(323,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>T-Series Passes PewDiePie Estimate<br/>(Time Zone {dispTz})</td>
+                    <td colSpan={5} style={wrapCell({...cellStyle(undefined,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>T-Series Passes PewDiePie Estimate (Time Zone {dispTz})</td>
                     {[4,5,6,7,8,9,10].map(ri => (
-                      <td key={ri} style={wrapCell({...cellStyle(60,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>{fmtOT(ri)}</td>
+                      <td key={ri} style={wrapCell({...cellStyle(undefined,42,"left",sbDark), fontWeight:"bold", fontSize:15})}>{fmtOT(ri)}</td>
                     ))}
                   </tr>
                   <tr>
-                    <td colSpan={5} style={{...cellStyle(323,21,"left",sbDark), fontWeight:"bold", fontSize:15}}>Est Subs at Crossover</td>
+                    <td colSpan={5} style={{...cellStyle(undefined,21,"left",sbDark), fontWeight:"bold", fontSize:15, whiteSpace:"normal"}}>Est Subs at Crossover</td>
                     {[4,5,6,7,8,9,10].map(ri => (
-                      <td key={ri} style={{...cellStyle(60,21,"left",sbDark), fontSize:15}}>{fmtXSubs(ri)}</td>
+                      <td key={ri} style={{...cellStyle(undefined,21,"left",sbDark), fontSize:15, whiteSpace:"normal"}}>{fmtXSubs(ri)}</td>
                     ))}
                   </tr>
                 </>);
               })() : (
               <tr>
-                <td colSpan={6} style={{...cellStyle(383,21,"left",sbDark),fontSize:15}}>{tableDisplayPt!=null&&tableDisplayPt<99000000?`PewDiePie to 100M by: ${fmtEta(pdp100Eta)}`:""}</td>
-                <td colSpan={6} style={{...cellStyle(360,21,"left",sbDark),fontSize:15}}>{tableDisplayTt!=null&&tableDisplayTt<99000000?`T-Series to 100M by: ${fmtEta(ts100Eta)}`:""}</td>
+                <td colSpan={6} style={{...cellStyle(undefined,21,"left",sbDark),fontSize:15}}>{tableDisplayPt!=null&&tableDisplayPt<99000000?`PewDiePie to 100M by: ${fmtEta(pdp100Eta)}`:""}</td>
+                <td colSpan={6} style={{...cellStyle(undefined,21,"left",sbDark),fontSize:15}}>{tableDisplayTt!=null&&tableDisplayTt<99000000?`T-Series to 100M by: ${fmtEta(ts100Eta)}`:""}</td>
               </tr>
               )}
               <tr>
-                <td colSpan={6} style={{...cellStyle(383,21,"left",sbDark),fontSize:15}}>PewDiePie to {pdpNextMs!=null?(pdpNextMs/1e6).toFixed(0)+"M":"\u2014"} by: {fmtEta(pdpMsEta)}</td>
-                <td colSpan={6} style={{...cellStyle(360,21,"left",sbDark),fontSize:15}}>T-Series to {tsNextMs!=null?(tsNextMs/1e6).toFixed(0)+"M":"\u2014"} by: {fmtEta(tsMsEta)}</td>
+                <td colSpan={6} style={{...cellStyle(undefined,21,"left",sbDark),fontSize:15}}>PewDiePie to {pdpNextMs!=null?(pdpNextMs/1e6).toFixed(0)+"M":"\u2014"} by: {fmtEta(pdpMsEta)}</td>
+                <td colSpan={6} style={{...cellStyle(undefined,21,"left",sbDark),fontSize:15}}>T-Series to {tsNextMs!=null?(tsNextMs/1e6).toFixed(0)+"M":"\u2014"} by: {fmtEta(tsMsEta)}</td>
               </tr>
             </tbody>
           </table>
@@ -8706,7 +8717,7 @@ export default function SocialBladeLive() {
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={topHistData} margin={{top:0,right:10,bottom:20,left:55}}>
                     <CartesianGrid vertical={false} stroke="#D0D0D0"/>
-                    <XAxis dataKey="t" type="number" domain={[tMinHist, gapTime]} allowDataOverflow ticks={ticksHist} tickFormatter={fmtHistTick} stroke="#D0D0D0" tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={{stroke:"#D0D0D0",strokeWidth:1}} tickSize={5}/>
+                    <XAxis dataKey="t" type="number" domain={[tMinHist, gapTime]} allowDataOverflow ticks={ticksHist} tickFormatter={fmtSbTick} stroke="#D0D0D0" tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={{stroke:"#D0D0D0",strokeWidth:1}} tickSize={5}/>
                     <YAxis tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={false} tickFormatter={v=>v===0?"0":v.toLocaleString()} domain={topAxis.domain} ticks={topAxis.ticks} allowDataOverflow/>
                     <Line type="monotone" dataKey="g" stroke={gapBlue} dot={false} strokeWidth={2} isAnimationActive={false}/>
                   </LineChart>
@@ -8747,7 +8758,7 @@ export default function SocialBladeLive() {
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={v2HistGapData} margin={{top:0,right:10,bottom:20,left:55}}>
                 <CartesianGrid vertical={false} stroke="#D0D0D0"/>
-                <XAxis dataKey="t" type="number" domain={[tMinHist, gapTime]} allowDataOverflow ticks={ticksHist} tickFormatter={fmtHistTick} stroke="#D0D0D0" tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={{stroke:"#D0D0D0",strokeWidth:1}} tickSize={5}/>
+                <XAxis dataKey="t" type="number" domain={[tMinHist, gapTime]} allowDataOverflow ticks={ticksHist} tickFormatter={fmtSbTick} stroke="#D0D0D0" tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={{stroke:"#D0D0D0",strokeWidth:1}} tickSize={5}/>
                 <YAxis tick={{fontSize:7,fontFamily:"Lucida Sans Unicode",fill:lightGray}} axisLine={false} tickLine={false} tickFormatter={v=>v===0?"0":v.toLocaleString()} domain={v2HistGapAxis.domain} ticks={v2HistGapAxis.ticks} allowDataOverflow/>
                 <Line type="monotone" dataKey="g" stroke={gapBlue} dot={false} strokeWidth={2} isAnimationActive={false}/>
               </LineChart>
