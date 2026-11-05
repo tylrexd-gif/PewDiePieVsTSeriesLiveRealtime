@@ -28,10 +28,19 @@ const { H } = window.__DATA;
 // On when the site is opened at /alt. The Alt Scenario button switches between / and /alt
 // in place (pushState, no page reload): _setAltScen swaps the data under the running app,
 // re-running every _onAltScen block below.
-// URL flags: /alt and /live combine in either order (/live/alt, /alt/live).
+// - 100M MODE -
+// Site URL /100m: a dataset of its own, Aug 18 00:00 EDT to Aug 30 00:00 EDT, unrelated to
+// the Oct 2018 - Jun 2019 timeline: the playhead, seek bar and charts cover only this
+// interval, with their own saved position. No audit list or news exist for it; YT Music
+// has no data this late, so SocialBlade and Flare use their pre-Music layouts.
+// DATA_MODE is 'real', 'alt' or '100m' (the DATA button cycles them).
+// URL flags: the mode and /live combine in either order (/live/alt, /alt/live).
 const _urlHas = (seg) => typeof window !== 'undefined' && window.location.pathname.split('/').includes(seg);
-const _urlFor = (alt, live) => ((live ? '/live' : '') + (alt ? '/alt' : '') || '/') + window.location.search + window.location.hash;
-let ALT_SCEN = _urlHas('alt');
+const _urlMode = () => _urlHas('100m') ? '100m' : _urlHas('alt') ? 'alt' : 'real';
+const _urlFor = (mode, live) => ((live ? '/live' : '') + (mode !== 'real' ? '/' + mode : '') || '/') + window.location.search + window.location.hash;
+let DATA_MODE = _urlMode();
+let ALT_SCEN = DATA_MODE === 'alt';
+let DATA_100M = DATA_MODE === '100m';
 const ALT_START_MS = Date.UTC(2019, 3, 11, 16, 0, 0);   // Apr 11 12:00 EDT
 const ALT_END_MS   = Date.UTC(2019, 6, 1, 3, 0, 0);     // Jun 30 23:00 EDT
 const ALT_TZ_SHIFT_MS = 4 * 3600000;
@@ -42,8 +51,12 @@ const EXT_START_MS = Date.UTC(2019, 4, 1, 4, 0, 0);    // May 1 00:00 EDT (= end
 const EXT_END_MS   = ALT_END_MS;                       // Jun 30 23:00 EDT
 const EXT_FILE     = 'real-pdp-ts.pvd.gz';
 const ALT_FILE     = 'scenario-pdp-ts.pvd.gz';
-// Module-level data that depends on ALT_SCEN is built in _onAltScen blocks: each runs
-// once at load (in file order) and again, in the same order, whenever ALT_SCEN flips.
+const M100_FILE     = 'PVTS_8_18_to_8_30.pvd.gz';
+const M100_START_MS = Date.UTC(2019, 7, 18, 4, 0, 0);   // Aug 18 00:00 EDT
+const M100_END_MS   = Date.UTC(2019, 7, 30, 4, 0, 0);   // Aug 30 00:00 EDT
+const M100_TS_LEAD_SINCE = Date.UTC(2019, 3, 14, 8, 57, 56);   // last lead change of the real timeline
+// Module-level data that depends on the data mode is built in _onAltScen blocks: each runs
+// once at load (in file order) and again, in the same order, whenever the mode changes.
 const _altScenBlocks = [];
 const _onAltScen = (fn) => { fn(); _altScenBlocks.push(fn); };
 const _arr = (k) => Array.isArray(window.__DATA[k]) ? window.__DATA[k] : [];
@@ -65,10 +78,12 @@ const _spliceDailyAlt = (real, alt) => {
 // the Alt Scenario exclusive lists (real later events would contradict the scenario).
 let FLARE_NEWS_ENTRIES, FLARE_PROMOTIONS, SBD_REAL, FTVD_REAL, REAL_AUDITS, REAL_AUDITS_MAJOR;
 _onAltScen(() => {
-  FLARE_NEWS_ENTRIES = ALT_SCEN ? [..._REAL_NEWS.filter(e => e.ms < ALT_START_MS), ...ALT_NEWS_ENTRIES] : _REAL_NEWS;
-  FLARE_PROMOTIONS   = ALT_SCEN ? [..._REAL_PROMOS.filter(e => e.ms < ALT_START_MS), ...ALT_PROMOTIONS] : _REAL_PROMOS;
-  SBD_REAL  = _spliceDailyAlt(_arr('SBD_REAL'),  _arr('SB_ALT'));
-  FTVD_REAL = _spliceDailyAlt(_arr('FTVD_REAL'), _arr('FTV_ALT'));
+  FLARE_NEWS_ENTRIES = DATA_100M ? [] : ALT_SCEN ? [..._REAL_NEWS.filter(e => e.ms < ALT_START_MS), ...ALT_NEWS_ENTRIES] : _REAL_NEWS;
+  FLARE_PROMOTIONS   = DATA_100M ? [] : ALT_SCEN ? [..._REAL_PROMOS.filter(e => e.ms < ALT_START_MS), ...ALT_PROMOTIONS] : _REAL_PROMOS;
+  // Blank CSV rows parse as 0 (SB has none from Aug 25): drop them, so the count holds its last value.
+  const daily = (k) => _arr(k).filter(a => a[1] > 0);
+  SBD_REAL  = _spliceDailyAlt(daily('SBD_REAL'),  _arr('SB_ALT'));
+  FTVD_REAL = _spliceDailyAlt(daily('FTVD_REAL'), _arr('FTV_ALT'));
   // Real Data audit events: [{ms, channel, type, magnitude}], sorted chronologically.
   // AltScen: real audits before ALT_START_MS, then the Scenario export's audits.
   // Otherwise: real audits, then the extension export's audits (from EXT_START_MS).
@@ -78,7 +93,7 @@ _onAltScen(() => {
   const fromExport = (key, from) => _arr(key)
     .map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta, minute_total: a.delta }))
     .filter(a => a.ms >= from);
-  REAL_AUDITS = ALT_SCEN
+  REAL_AUDITS = DATA_100M ? [] : ALT_SCEN
     ? [..._arr('REAL_AUDITS').filter(a => a.ms < ALT_START_MS), ...fromExport('ALT_AUDITS', ALT_START_MS)].sort((x, y) => x.ms - y.ms)
     : [..._arr('REAL_AUDITS').filter(a => a.ms < EXT_START_MS), ...fromExport('EXT_AUDITS', EXT_START_MS)].sort((x, y) => x.ms - y.ms);
   // Only major events (type === 'audit') are used for chart markers, gain stripping, and the
@@ -635,7 +650,7 @@ const HIST_AUTO_RESET_IDX = (() => {
 // otherwise (real data + extension). All May/June switch dates in this file are Eastern
 // (EDT = UTC-4), matching Scenario.
 let SB_V2_TS;
-_onAltScen(() => { SB_V2_TS = ALT_SCEN ? Date.UTC(2019, 4, 20, 4, 0) : Date.UTC(2019, 3, 29, 22, 0); });
+_onAltScen(() => { SB_V2_TS = DATA_100M ? Infinity : ALT_SCEN ? Date.UTC(2019, 4, 20, 4, 0) : Date.UTC(2019, 3, 29, 22, 0); });
 // The later SB V2 phases are computed from the data, not dated: the "TS Pass PDP"
 // prediction starts at TS_SLOWDOWN_TS (showMidMode), and the Music/TS/PDP order flip
 // happens at TS_LEAD_TS - the first full hour after T-Series overtakes (showTsOverMode).
@@ -696,7 +711,7 @@ _onAltScen(() => {
   ({ TS_LEAD_TS, TS_SLOWDOWN_TS, PDP_100M_TS, TS_100M_TS, BOTH_100M_TS } = _SWITCH_TIMES_RAW);
 });
 
-// AltScen: RAW is empty in real mode, so recompute the switch times above with the
+// AltScen / 100M: RAW is empty in real mode, so recompute the switch times above with the
 // same rules from on-the-hour samples of the per-second data, once it has loaded.
 function _recomputeSwitchTimesFromBuf(buf) {
   const H = [];
@@ -736,17 +751,20 @@ const DAY_MS = 24 * HOUR_MS;
 // it changes). Unpacked in the browser to interleaved [pdp, ts, pdp, ts, ...] per second.
 // Start: 2018-10-17 00:00:00 EDT (= UTC+4h); end: 2019-05-01 00:00:00 EDT.
 // Total pairs: 16,934,401 (indices 0..16,934,400 = 196 days inclusive).
-const REAL_DATA_START_MS = Date.UTC(2018, 9, 17, 4, 0, 0); // 2018-10-17 00:00:00 EDT (UTC-4)
+const REAL_TL_START_MS = Date.UTC(2018, 9, 17, 4, 0, 0); // 2018-10-17 00:00:00 EDT (UTC-4)
+let REAL_DATA_START_MS;   // start of the loaded timeline: REAL_TL_START_MS, or M100_START_MS in 100M mode
 // The per-second buffer is the real binary up to EXT_START_MS, then the real-data
 // extension (real-pdp-ts.bin) through EXT_END_MS. With AltScen on it is real data up to
 // ALT_START_MS, then the Scenario export (scenario-pdp-ts.bin) through ALT_END_MS.
 // Both modes end at the same time, so the timeline length is the same either way.
 const REAL_BIN_PAIR_COUNT = 16934401; // seconds in the real binary alone (indices 0..16934400, through May 1 00:00 EDT)
-const ALT_PAIR_COUNT = (ALT_END_MS - REAL_DATA_START_MS) / 1000 + 1;
-const EXT_PAIR_COUNT = (EXT_END_MS - REAL_DATA_START_MS) / 1000 + 1;
+const ALT_PAIR_COUNT = (ALT_END_MS - REAL_TL_START_MS) / 1000 + 1;
+const EXT_PAIR_COUNT = (EXT_END_MS - REAL_TL_START_MS) / 1000 + 1;
+const M100_PAIR_COUNT = (M100_END_MS - M100_START_MS) / 1000 + 1;
 let REAL_DATA_PAIR_COUNT, REAL_DATA_END_MS;
 _onAltScen(() => {
-  REAL_DATA_PAIR_COUNT = ALT_SCEN ? ALT_PAIR_COUNT : EXT_PAIR_COUNT;
+  REAL_DATA_START_MS = DATA_100M ? M100_START_MS : REAL_TL_START_MS;
+  REAL_DATA_PAIR_COUNT = DATA_100M ? M100_PAIR_COUNT : ALT_SCEN ? ALT_PAIR_COUNT : EXT_PAIR_COUNT;
   REAL_DATA_END_MS = REAL_DATA_START_MS + (REAL_DATA_PAIR_COUNT - 1) * 1000; // 2019-06-30 23:00 EDT
 });
 
@@ -767,8 +785,8 @@ function _fmtPatchMs(ms) {
 
 // PDP has been continuously ahead of TS since before the dataset.
 // At dataset start he had been ahead for 1887d 23h 49m 0s, so the implied
-// lead-start timestamp is this many ms before REAL_DATA_START_MS.
-const PDP_LEAD_SINCE = REAL_DATA_START_MS - (1887 * 86400 + 23 * 3600 + 49 * 60) * 1000;
+// lead-start timestamp is this many ms before the start of the real timeline.
+const PDP_LEAD_SINCE = REAL_TL_START_MS - (1887 * 86400 + 23 * 3600 + 49 * 60) * 1000;
 let REAL_DATA_HOURS;
 _onAltScen(() => {
   REAL_DATA_HOURS = Math.round((REAL_DATA_END_MS - REAL_DATA_START_MS) / HOUR_MS); // real: 4704 (196 days) - playhead range in hour units
@@ -839,7 +857,7 @@ async function _loadMergedExport(file, exportFile, pairCount) {
   if (pk && (pk.stepMs !== 1000 || pk.nCh < 2)) pk = null;
   const out = new Uint32Array(pairCount * 2);
   const realPairs = real.length >> 1;
-  const sw = pk ? Math.round((pk.startMs + ALT_TZ_SHIFT_MS - REAL_DATA_START_MS) / 1000) : realPairs;   // first pair taken from the export
+  const sw = pk ? Math.round((pk.startMs + ALT_TZ_SHIFT_MS - REAL_TL_START_MS) / 1000) : realPairs;   // first pair taken from the export
   const keep = Math.min(sw, realPairs, pairCount);
   out.set(real.subarray(0, keep * 2));
   let last = keep - 1;
@@ -865,7 +883,7 @@ let _gapCrossings = null;
 function _computeGapCrossings(buf) {
   const out = [];
   let tsAhead = buf[1] > buf[0];
-  if (tsAhead) out.push(REAL_DATA_START_MS);
+  if (tsAhead) out.push(DATA_100M ? M100_TS_LEAD_SINCE : REAL_DATA_START_MS);
   for (let i = 1; i < REAL_DATA_PAIR_COUNT; i++) {
     const a = buf[i * 2 + 1] > buf[i * 2];
     if (a !== tsAhead) { out.push(REAL_DATA_START_MS + i * 1000); tsAhead = a; }
@@ -906,26 +924,29 @@ function _computeAltVoteSchedule(buf) {
 let _realDataGen = 0;
 let _realDataFile = null;     // file the installed _realDataBuf came from
 let _realDataVersion = 0;     // bumped per installed buffer; the app's realDataReady holds it
-const _fetchSeriesFor = (file, alt) => alt
-  ? _loadMergedExport(file, ALT_FILE, ALT_PAIR_COUNT)
+async function _load100M() {
+  const buf = await _fetchRealSeries(M100_FILE);
+  if (buf.length !== M100_PAIR_COUNT * 2) throw new Error('unexpected 100M data length');
+  return buf;
+}
+const _fetchSeriesFor = (file, mode) => mode === '100m' ? _load100M()
+  : mode === 'alt' ? _loadMergedExport(file, ALT_FILE, ALT_PAIR_COUNT)
   : _loadMergedExport(file, EXT_FILE, EXT_PAIR_COUNT);
-// Installs a loaded buffer (for the current ALT_SCEN) with everything computed from it.
+// Installs a loaded buffer (for the current DATA_MODE) with everything computed from it.
 function _installRealData(buf, file) {
   _realDataBuf = buf;
   _realDataFile = file;
   _realDataVersion++;
   _gapCrossings = _computeGapCrossings(buf);
   _altVoteSchedule = null;
-  if (ALT_SCEN) {
-    _altVoteSchedule = _computeAltVoteSchedule(buf);
-    _recomputeSwitchTimesFromBuf(buf);
-  }
+  if (ALT_SCEN) _altVoteSchedule = _computeAltVoteSchedule(buf);
+  if (ALT_SCEN || DATA_100M) _recomputeSwitchTimesFromBuf(buf);
 }
 function _loadRealData(onDone, file = 'every_second_counts_pvt.pvd.gz') {
   if (_realDataLoading) return;
   _realDataLoading = true;
   const gen = ++_realDataGen;
-  _fetchSeriesFor(file, ALT_SCEN)
+  _fetchSeriesFor(file, DATA_MODE)
     .then(buf => {
       if (gen !== _realDataGen) return;
       _installRealData(buf, file);
@@ -1005,7 +1026,7 @@ function _loadRawAlt(onDone) {
     .catch(() => { _rawAltLoading = false; onDone?.(); });
 }
 function rawAltAt(t) {
-  if (!_rawAltBuf) return null;
+  if (!_rawAltBuf || DATA_100M) return null;   // the raw file is on the real timeline
   if (t < REAL_DATA_START_MS || t > REAL_DATA_END_MS) return null;
   const idx = Math.max(0, Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t - REAL_DATA_START_MS) / 1000)));
   if (idx * 2 + 1 >= _rawAltBuf.length) return null;   // raw file covers the real binary only (not the extension)
@@ -3497,7 +3518,7 @@ const FlareView = React.memo(({
   //                                the cards row).
   const _subtitleT = clockTime || 0;
   // Music-era layout starts May 22 00:00 EDT with Alt Scenario on, Apr 29 18:00 EDT without.
-  const _isMusicEra = _subtitleT >= (ALT_SCEN ? Date.UTC(2019, 4, 22, 4, 0) : Date.UTC(2019, 3, 29, 22, 0));
+  const _isMusicEra = !DATA_100M && _subtitleT >= (ALT_SCEN ? Date.UTC(2019, 4, 22, 4, 0) : Date.UTC(2019, 3, 29, 22, 0));
   // Vote infrastructure is retired at May 20 00:00 UTC - same threshold
   // used by the news-ticker strawpoll fragment. Three things turn off
   // together: the per-card "X Votes / Y%" mini-bar, and the rotating
@@ -5261,33 +5282,36 @@ const SpectrumAnalyzer = React.memo(({ playing = true, mult = 1, live = false, a
 // Survives view switches so re-entering dashboard is instant.
 const _gapCrossingsCache = new Map();
 
-// - ALT SCENARIO SWITCH (no page reload) -
+// - DATA MODE SWITCH (no page reload) -
 // Builds the other mode's per-second buffer while the current one keeps playing, then in
-// one step flips ALT_SCEN, rebuilds the Alt-dependent module data (_onAltScen blocks),
+// one step flips DATA_MODE, rebuilds the mode-dependent module data (_onAltScen blocks),
 // drops caches built from the old data and installs the new buffer. The running app
 // then just re-renders on the new data (_onAltSwapped): nothing is remounted, so
-// counters, charts, open panels and playback carry on.
+// counters, charts, open panels and playback carry on. (100M has its own timeline, so
+// entering or leaving it also moves the playhead - see _onAltSwapped in the app.)
 const _SMOOTH_FILE = 'every_second_counts_pvt.pvd.gz';
 
 // Dev mode is local-only: start.bat / npm run dev serve on localhost.
 const DEV_MODE_ALLOWED = typeof window !== 'undefined' && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname);
 let _onAltSwapped = null;
 let _altSwitchTarget = null;  // mode being switched to, while its buffer is built
-async function _setAltScen(on) {
-  if (_altSwitchTarget !== null) { _altSwitchTarget = on; return; }   // the running switch picks up the latest target
-  if (on === ALT_SCEN) return;
-  _altSwitchTarget = on;
+async function _setDataMode(mode) {
+  if (_altSwitchTarget !== null) { _altSwitchTarget = mode; return; }   // the running switch picks up the latest target
+  if (mode === DATA_MODE) return;
+  _altSwitchTarget = mode;
   const file = _realDataFile ?? _SMOOTH_FILE;   // keeps Raw mode if it is on
-  let target = on, buf = null;
+  let target = mode, buf = null;
   for (;;) {
     try { buf = await _fetchSeriesFor(file, target); } catch { buf = null; }
     if (_altSwitchTarget === target) break;
     target = _altSwitchTarget;   // toggled again meanwhile
-    if (target === ALT_SCEN) { _altSwitchTarget = null; _onAltSwapped?.(); return; }
+    if (target === DATA_MODE) { _altSwitchTarget = null; _onAltSwapped?.(); return; }
   }
   _altSwitchTarget = null;
-  if (!buf) { window.history.replaceState(null, '', _altPathOf(ALT_SCEN)); _onAltSwapped?.(); return; }   // load failed: stay put
-  ALT_SCEN = target;
+  if (!buf) { window.history.replaceState(null, '', _modePath(DATA_MODE)); _onAltSwapped?.(); return; }   // load failed: stay put
+  DATA_MODE = target;
+  ALT_SCEN = target === 'alt';
+  DATA_100M = target === '100m';
   for (const fn of _altScenBlocks) fn();
   _CHAN_NOISE_CACHE.clear();
   _gapCrossingsCache.clear();
@@ -5296,7 +5320,11 @@ async function _setAltScen(on) {
   _installRealData(buf, file);
   _onAltSwapped?.();
 }
-const _altPathOf = (on) => _urlFor(on, _urlHas('live'));
+const _modePath = (mode) => _urlFor(mode, _urlHas('live'));
+const _DATA_MODE_NEXT = { real: 'alt', alt: '100m', '100m': 'real' };
+const _DATA_MODE_LABEL = { real: 'Real Data', alt: 'Alt Scenario', '100m': '100M' };
+// localStorage key of the saved playhead: the real and Alt modes share one timeline, 100M has its own.
+const _posKey = () => DATA_100M ? 'pos100m' : 'pos';
 
 // Predict Overtake: ms until T-Series catches PewDiePie at the given subs/min rates
 // (rounded, as the table shows them). Null if no overtake is ahead at those rates, or
@@ -5368,7 +5396,7 @@ export default function SocialBladeLive() {
   const initNowPos = useMemo(() => nowToPos(), []);
 
   // STARTUP: resumes the saved position, or lands on Now at /live (see KEEP_STATE_ON_LOAD).
-  const _keptPos = KEEP_STATE_ON_LOAD && _ss.pos != null ? Math.max(0, Math.min(REAL_DATA_HOURS, _ss.pos)) : null;
+  const _keptPos = KEEP_STATE_ON_LOAD ? Math.max(0, Math.min(REAL_DATA_HOURS, _ss[_posKey()] ?? 0)) : null;
   const [pos, setPos] = useState(_keptPos ?? initNowPos);
   const [menuOpen, setMenuOpen] = useState(() => _ss.menuOpen != null ? _ss.menuOpen : true);
   const [barHidden, setBarHidden] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.barHidden ?? true) : true); // STARTUP: always fully hidden
@@ -5538,7 +5566,7 @@ export default function SocialBladeLive() {
     _saveSS({ view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
   }, [view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
   useEffect(() => {
-    const id = setInterval(() => { _saveSS({ pos: posRef.current }); }, 3000);
+    const id = setInterval(() => { _saveSS({ [_posKey()]: posRef.current }); }, 3000);
     return () => clearInterval(id);
   }, []);
   const rafRef = useRef(null);
@@ -5605,21 +5633,30 @@ export default function SocialBladeLive() {
     });
   }, [rawMode]);
 
-  // Alt Scenario switch: the data was swapped in place (see _setAltScen) - re-render on it,
-  // keeping everything else. Only the playhead moves, and only if the new timeline ends
-  // before it (leaving Alt past May 1). Browser back/forward between / and /alt switches too.
+  // Data mode switch: the data was swapped in place (see _setDataMode) - re-render on it,
+  // keeping everything else. Only the playhead moves: to the other timeline's saved position
+  // when entering or leaving 100M, otherwise only if the new timeline ends before it.
+  // Browser back/forward between /, /alt and /100m switches too.
+  const posKeyRef = useRef(_posKey());
   const [altSwitching, setAltSwitching] = useState(false);   // the other mode's data is being built
   const [liveUrl, setLiveUrl] = useState(() => _urlHas('live'));
   useEffect(() => {
     _onAltSwapped = () => {
       setRealDataReady(_realDataBuf ? _realDataVersion : 0);
-      if (posRef.current > REAL_DATA_HOURS) {
+      if (posKeyRef.current !== _posKey()) {
+        _saveSS({ [posKeyRef.current]: posRef.current });
+        posKeyRef.current = _posKey();
+        const p = _loadSS()[posKeyRef.current] ?? (DATA_100M ? 0 : nowToPos());
+        posRef.current = p; setPos(p);
+        clearRT();
+        dispatch({type:"BUMP_SEEK"});
+      } else if (posRef.current > REAL_DATA_HOURS) {
         posRef.current = REAL_DATA_HOURS; setPos(REAL_DATA_HOURS);
         dispatch({type:"BUMP_SEEK"});
       }
       setAltSwitching(false);
     };
-    const onPop = () => { setLiveUrl(_urlHas('live')); const on = _urlHas('alt'); if (on !== (_altSwitchTarget ?? ALT_SCEN)) { setAltSwitching(true); _setAltScen(on); } };
+    const onPop = () => { setLiveUrl(_urlHas('live')); const m = _urlMode(); if (m !== (_altSwitchTarget ?? DATA_MODE)) { setAltSwitching(true); _setDataMode(m); } };
     window.addEventListener('popstate', onPop);
     return () => { _onAltSwapped = null; window.removeEventListener('popstate', onPop); };
   }, []);
@@ -5653,7 +5690,7 @@ export default function SocialBladeLive() {
       return;
     }
     if (following && seekToken === liveSeekRef.current) return;
-    window.history.replaceState(null, '', _urlFor(_urlHas('alt'), false));
+    window.history.replaceState(null, '', _urlFor(_urlMode(), false));
     setLiveUrl(false);
   }, [liveUrl, playing, reverse, speedMode, mult, seekToken]);
   const goNow = () => {
@@ -6126,7 +6163,7 @@ export default function SocialBladeLive() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [maxIdx, speedMode, isDyn, mult]);
+  }, [maxIdx, effectiveMaxIdx, speedMode, isDyn, mult]);
 
   // - Main playback loop (rAF-paced; handles 1m, 1h, and Dynamic) -
   // RT modes (frt/rt/crt) are handled by their own setInterval /
@@ -8016,8 +8053,8 @@ export default function SocialBladeLive() {
               {/* Live: jumps to Now and goes to /live. Already there and playing at Now, it leaves /live instead. */}
               <button onClick={()=>{
                 const atNow = playing && Math.abs(posRef.current - nowToPos()) * 3600 <= 5;
-                if (liveUrl && atNow) { window.history.pushState(null, '', _urlFor(_urlHas('alt'), false)); setLiveUrl(false); return; }
-                if (!liveUrl) { window.history.pushState(null, '', _urlFor(_urlHas('alt'), true)); setLiveUrl(true); }
+                if (liveUrl && atNow) { window.history.pushState(null, '', _urlFor(_urlMode(), false)); setLiveUrl(false); return; }
+                if (!liveUrl) { window.history.pushState(null, '', _urlFor(_urlMode(), true)); setLiveUrl(true); }
                 goNow();
                 setBarHidden(true);
               }}
@@ -8117,12 +8154,12 @@ export default function SocialBladeLive() {
 
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
-          {/* DATA: Alt Scenario toggle (persisted; reloads to swap the datasets) */}
+          {/* DATA: cycles Real Data -> Alt Scenario -> 100M (kept in the URL; swaps the datasets in place) */}
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DATA</span>
-            <button onClick={()=>{ const on = !(_altSwitchTarget ?? ALT_SCEN); window.history.pushState(null, '', _altPathOf(on)); setAltSwitching(true); _setAltScen(on); }}
-              title="Swaps data to the alternate 'Aleksander Effect' scenario starting Apr 11 12:00 EDT"
-              style={{ background:ALT_SCEN?"#2a1a35":"transparent", color:ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN?600:400, opacity:altSwitching?0.6:1 }}>{altSwitching ? "Switching…" : "Alt Scenario"}</button>
+            <button onClick={()=>{ const m = _DATA_MODE_NEXT[_altSwitchTarget ?? DATA_MODE]; window.history.pushState(null, '', _modePath(m)); setAltSwitching(true); _setDataMode(m); }}
+              title={DATA_100M ? "100M: just Aug 18 00:00 - Aug 30 00:00 EDT, separate from the other data. Click for Real Data" : ALT_SCEN ? "Alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT. Click for 100M" : "Real data. Click for the alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT"}
+              style={{ background:DATA_100M?"#2f2510":ALT_SCEN?"#2a1a35":"transparent", color:DATA_100M?"#e3b85c":ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(DATA_100M?"#5c4a1e":ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN||DATA_100M?600:400, opacity:altSwitching?0.6:1 }}>{altSwitching ? "Switching…" : _DATA_MODE_LABEL[DATA_MODE]}</button>
           </div>
 
           {/* OPTIONS (view-specific) */}

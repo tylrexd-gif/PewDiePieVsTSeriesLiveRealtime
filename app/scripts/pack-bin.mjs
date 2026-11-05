@@ -28,6 +28,10 @@ export function packBinary(inPath, outPath, startMsForRaw) {
   if (isNPT1) {
     startMs = Number(buf.readBigInt64LE(4));
     stepMs = buf.readInt32LE(12); n = buf.readInt32LE(16); nCh = buf.readInt32LE(20);
+    // Some exports leave these header fields zero: [pdp, ts] per second, count from the size.
+    if (!stepMs) stepMs = 1000;
+    if (!nCh) nCh = 2;
+    if (!n) n = Math.floor((buf.length - 24) / (nCh * 4));
     vals = new Int32Array(buf.buffer.slice(buf.byteOffset + 24, buf.byteOffset + 24 + n * nCh * 4));
   } else {
     if (startMsForRaw == null) throw new Error('raw input needs startMs');

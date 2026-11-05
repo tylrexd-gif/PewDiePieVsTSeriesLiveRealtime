@@ -21,6 +21,7 @@ app/dist/data/every_second_counts_pvt_u32le.raw.bin
 app/dist/data/every_second_counts_pvt_u32le.bin
 app/dist/data/scenario-pdp-ts.bin
 app/dist/data/real-pdp-ts.bin
+app/dist/data/PVTS_8_18_to_8_30_u32le.bin
 app/dist/data/*.bin.*-bak
 
 # node
