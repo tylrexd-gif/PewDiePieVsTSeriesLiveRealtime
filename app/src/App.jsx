@@ -639,6 +639,23 @@ const KEEP_STATE_ON_LOAD = !_urlHas('live') && _loadSS().pos != null;
 // chart reseeds its start to that boundary so it begins recording from
 // then on. HIST_AUTO_RESET_IDX is the matching hourly RAW index, found
 // once at module load so the per-render effect just compares.
+// Sub Gap Window = 0: the historical chart starts at the latest of these instead of rolling.
+// In UTC; the comments are the Eastern times (EDT +4, EST +5 from Nov 4 to Mar 10 2:00).
+const SB_GAP_RESETS = [
+  Date.UTC(2018, 9, 17, 4),    // Oct 17 00:00 (start of the data)
+  Date.UTC(2018, 9, 24, 4),    // Oct 24 00:00
+  Date.UTC(2018, 9, 29, 4),    // Oct 29 00:00
+  Date.UTC(2018, 10, 2, 21),   // Nov 2 17:00
+  Date.UTC(2018, 10, 6, 5),    // Nov 6 00:00
+  Date.UTC(2018, 10, 9, 21),   // Nov 9 16:00
+  Date.UTC(2018, 11, 9, 20),   // Dec 9 15:00
+  Date.UTC(2018, 11, 16, 21),  // Dec 16 16:00
+  Date.UTC(2019, 1, 19, 17),   // Feb 19 12:00
+  Date.UTC(2019, 2, 10, 7),    // Mar 10 2:00 (the moment DST starts)
+  Date.UTC(2019, 2, 11, 21),   // Mar 11 17:00
+  Date.UTC(2019, 2, 22, 6),    // Mar 22 02:00
+  Date.UTC(2019, 3, 29, 22),   // Apr 29 18:00
+];
 const HIST_AUTO_RESET_TS = Date.UTC(2019, 3, 29, 18, 0);
 const HIST_AUTO_RESET_IDX = (() => {
   for (let i = 0; i < RAW.length; i++) {
@@ -646,11 +663,11 @@ const HIST_AUTO_RESET_IDX = (() => {
   }
   return RAW.length - 1;
 })();
-// SB V2 layout activates at May 20 00:00 EDT with AltScen on, and at Apr 29 18:00 EDT
-// otherwise (real data + extension). All May/June switch dates in this file are Eastern
-// (EDT = UTC-4), matching Scenario.
+// SB V2 layout activates at May 20 00:00 EDT with AltScen on, at Apr 29 18:00 EDT with real
+// data + extension, and is always on in 100M. All May/June switch dates in this file are
+// Eastern (EDT = UTC-4), matching Scenario.
 let SB_V2_TS;
-_onAltScen(() => { SB_V2_TS = DATA_100M ? Infinity : ALT_SCEN ? Date.UTC(2019, 4, 20, 4, 0) : Date.UTC(2019, 3, 29, 22, 0); });
+_onAltScen(() => { SB_V2_TS = DATA_100M ? -Infinity : ALT_SCEN ? Date.UTC(2019, 4, 20, 4, 0) : Date.UTC(2019, 3, 29, 22, 0); });
 // The later SB V2 phases are computed from the data, not dated: the "TS Pass PDP"
 // prediction starts at TS_SLOWDOWN_TS (showMidMode), and the Music/TS/PDP order flip
 // happens at TS_LEAD_TS - the first full hour after T-Series overtakes (showTsOverMode).
@@ -967,6 +984,21 @@ function realDataAt(t) {
   if (t < REAL_DATA_START_MS || t > REAL_DATA_END_MS) return null;
   const idx = Math.max(0, Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t - REAL_DATA_START_MS) / 1000)));
   return { pdp: _realDataBuf[idx * 2], ts: _realDataBuf[idx * 2 + 1] };
+}
+
+// 100M: {pdp, ts} before its data starts, for long lookbacks. Hourly real counts (labelled
+// Eastern, EDT throughout) interpolated linearly, with the last hour running into the data.
+function m100HistoryAt(t) {
+  const H = _arr('M100_HIST');
+  if (!H.length) return null;
+  const q = t - ALT_TZ_SHIFT_MS;
+  const i = Math.floor((q - H[0][0]) / HOUR_MS);
+  if (i < 0 || i >= H.length) return null;
+  const a = H[i], first = realDataAt(M100_START_MS);
+  const b = H[i + 1] ?? (first && [a[0] + HOUR_MS, first.pdp, first.ts]);
+  if (!b) return null;
+  const f = (q - a[0]) / HOUR_MS;
+  return { pdp: a[1] + (b[1] - a[1]) * f, ts: a[2] + (b[2] - a[2]) * f };
 }
 
 // - Excess vs OTL (Alt Scenario only) -
@@ -2578,7 +2610,8 @@ const OdometerDigit = ({ fromDigit, totalSteps, duration, animKey }) => {
 };
 
 // LAYOUT: Shared counter - see LAYOUTS.md
-const CasinoCounter = ({ value, signed, duration = 3400, seekToken = 0 }) => {
+// decimals: value is an integer scaled by 10^decimals (1234 with decimals=2 shows "12.34").
+const CasinoCounter = ({ value, signed, duration = 3400, seekToken = 0, decimals = 0 }) => {
   const num = value == null ? null : Math.round(value);
   const prevRef = useRef(num || 0);
   const lastSeekRef = useRef(seekToken);
@@ -2605,8 +2638,8 @@ const CasinoCounter = ({ value, signed, duration = 3400, seekToken = 0 }) => {
   const { from, to, key } = display;
   const prefix = signed ? (to >= 0 ? "+" : "-") : "";
   const absFrom = Math.abs(from), absTo = Math.abs(to);
-  const formatted = Math.round(absTo).toLocaleString();
-  const digitsOnly = formatted.replace(/,/g, "");
+  const formatted = decimals ? (absTo / Math.pow(10, decimals)).toFixed(decimals) : Math.round(absTo).toLocaleString();
+  const digitsOnly = formatted.replace(/[,.]/g, "");
   const numDigits = digitsOnly.length;
   let dIdx = 0;
 
@@ -2614,7 +2647,7 @@ const CasinoCounter = ({ value, signed, duration = 3400, seekToken = 0 }) => {
     <span style={{ display:"inline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 }}>
       {prefix && <span style={{ display:"inline-block", height:"1em", lineHeight:1, verticalAlign:"top" }}>{prefix}</span>}
       {formatted.split("").map((ch, i) => {
-        if (ch === ",") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>,</span>;
+        if (ch === "," || ch === ".") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>{ch}</span>;
         const power = numDigits - 1 - dIdx; dIdx++;
         const div = Math.pow(10, power);
         const fromDigit = Math.floor(absFrom / div) % 10;
@@ -5305,7 +5338,8 @@ async function _setDataMode(mode) {
   _onAltSwapped?.();
 }
 const _modePath = (mode) => _urlFor(mode, _urlHas('live'));
-const _DATA_MODE_NEXT = { real: 'alt', alt: '100m', '100m': 'real' };
+// 100M is in the cycle on localhost only; online it is reached by its URL.
+const _DATA_MODE_NEXT = { real: 'alt', alt: DEV_MODE_ALLOWED ? '100m' : 'real', '100m': 'real' };
 const _DATA_MODE_LABEL = { real: 'Real Data', alt: 'Alt Scenario', '100m': '100M' };
 // localStorage key of the saved playhead: the real and Alt modes share one timeline, 100M has its own.
 const _posKey = () => DATA_100M ? 'pos100m' : 'pos';
@@ -5417,6 +5451,9 @@ export default function SocialBladeLive() {
   const [view, setView] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.view ?? "socialblade") : "socialblade"); // STARTUP: always SocialBlade
   const [dashWin, setDashWin] = useState(() => _ss.dashWin ?? 7);
   const [sbGapWin, setSbGapWin] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.sbGapWin ?? 14) : 14); // STARTUP: always 14d
+  // Text while editing the Sub Gap Window box: a lone "-" isn't a number yet, and a controlled
+  // value would wipe it on the next render.
+  const [sbGapDraft, setSbGapDraft] = useState(null);
   const [dashChanFilter, setDashChanFilter] = useState('both'); // 'both'|'pdp'|'ts'
   const dashShowCharts = true;
   // Per-second mode (standard dashboard): swaps the 1min-gain chart for a 1s-gain
@@ -5852,9 +5889,12 @@ export default function SocialBladeLive() {
   }, [tMinGap1d, _gap1dKey, _gap1dQuantum, _gap1dStep, realDataReady]);
 
   // In Real Data mode the hist chart shows a rolling sbGapWin-day window ending at
-  // curTime. In Alt mode tStart is fixed at the user-chosen reset point.
+  // curTime, or with sbGapWin = 0 runs from the latest fixed reset point (SB_GAP_RESETS).
+  // In Alt mode tStart is fixed at the user-chosen reset point.
   const _histTStart = appMode === 'real'
-    ? Math.max(REAL_DATA_START_MS, gapTime - sbGapWin * DAY_MS)
+    ? Math.max(REAL_DATA_START_MS, sbGapWin <= 0
+        ? SB_GAP_RESETS.reduce((last, t) => t <= gapTime ? t : last, SB_GAP_RESETS[0])
+        : gapTime - sbGapWin * DAY_MS)
     : RAW[histStartIdx].t;
   const _histSpan = Math.max(0, gapTime - _histTStart);
   // Sample by the data actually in the window (down to its 1s resolution), at any speed.
@@ -6027,6 +6067,10 @@ export default function SocialBladeLive() {
   const v2HistGapAxis = _v2GapFlip
     ? roundGapAxis(v2HistGapData, _domExtraCP?.g != null ? -_domExtraCP.g : null)
     : histGapAxis;
+  // SB V2 top gap in 100M: TS - Music (T-Series is on top there), the Music/TS series negated.
+  const m100TopGap1hData = useMemo(() => DATA_100M ? _negG(musicTsGap1hData) : [], [musicTsGap1hData]);
+  const m100TopGap1dData = useMemo(() => DATA_100M ? _negG(musicTsGap1dData) : [], [musicTsGap1dData]);
+  const m100TopHistData  = useMemo(() => DATA_100M ? _negG(musicTsHistGapData) : [], [musicTsHistGapData]);
 
   // Rates
   const pdpPerMin = useMemo(() => getMomentaryRate(pos, "pt"), [pos]);
@@ -6056,12 +6100,13 @@ export default function SocialBladeLive() {
   const _use1mInterp = speedMode === "1m" && !minuteSnap;
   const subsPerMinTable = useMemo(() => {
     const lookbacks = [1/60, 5/60, 1, 12, 24, 48, 72, 120, 168, 336, 720];
-    // Binary lookup: returns null when lookback window starts before REAL_DATA_START_MS.
+    // Binary lookup: returns null when lookback window starts before REAL_DATA_START_MS
+    // (100M reads its hourly history there).
     const rdRate = (key, lb) => {
       const t1 = tableTime;
       const t0 = t1 - lb * HOUR_MS;
       const v1 = realDataAt(t1);
-      const v0 = realDataAt(t0);
+      const v0 = realDataAt(t0) ?? (DATA_100M ? m100HistoryAt(t0) : null);
       if (!v1 || !v0) return null;
       return ((key === 'pdp' ? v1.pdp : v1.ts) - (key === 'pdp' ? v0.pdp : v0.ts)) / (lb * 60);
     };
@@ -7949,10 +7994,14 @@ export default function SocialBladeLive() {
   // Show Excess: "Excess Subs vs OTL" readout (ported from SCENARIO). Excess = the Alt
   // Scenario count minus the OTL (real timeline) count at the same second; Diff = each
   // channel's share of the combined excess while both are positive. big = Default layouts.
+  // Each channel's excess updates at that channel's own tick, like its counter.
   const renderExcessReadout = (big = false) => {
-    const ex = excessOn ? excessAt(curTime) : null;
-    const pdpEx = ex ? ex.pdp : null, tsEx = ex ? ex.ts : null;
+    const exP = excessOn ? excessAt(pdpTime) : null, exT = excessOn ? excessAt(tsTime) : null;
+    const pdpEx = exP ? exP.pdp : null, tsEx = exT ? exT.ts : null;
     const fs1 = big ? 14 : 10, lbl = big ? 11 : 9;
+    const pct = (v) => isRTMode
+      ? <><CasinoCounter value={Math.round(v / tot * 10000)} decimals={2} duration={dur} seekToken={seekToken}/>%</>
+      : (v / tot * 100).toFixed(2) + "%";
     const val = (v) => v != null && v !== 0
       ? (isRTMode ? <CasinoCounter value={v} signed duration={dur} seekToken={seekToken}/> : (v > 0 ? "+" : "") + v.toLocaleString())
       : "--";
@@ -7963,7 +8012,7 @@ export default function SocialBladeLive() {
         <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums"}}><span style={{color:eDC.PDP}}>PewDiePie: </span><span style={{color:eDC.TEXT,fontWeight:700}}>{val(pdpEx)}</span></div>
         <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums"}}><span style={{color:eDC.TS}}>T-Series: </span><span style={{color:eDC.TEXT,fontWeight:700}}>{val(tsEx)}</span></div>
         <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums",color:eDC.DIM}}>Diff: {both
-          ? <><span style={{color:"rgba(160,200,255,1)",fontWeight:700}}>{(pdpEx / tot * 100).toFixed(2)}%</span> <span style={{color:"rgba(255,160,160,1)",fontWeight:700}}>{(tsEx / tot * 100).toFixed(2)}%</span></>
+          ? <><span style={{color:"rgba(160,200,255,1)",fontWeight:700}}>{pct(pdpEx)}</span> <span style={{color:"rgba(255,160,160,1)",fontWeight:700}}>{pct(tsEx)}</span></>
           : <span style={{fontWeight:700}}>--</span>}</div>
       </div>
     );
@@ -8169,7 +8218,7 @@ export default function SocialBladeLive() {
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DATA</span>
             <button onClick={()=>{ const m = _DATA_MODE_NEXT[_altSwitchTarget ?? DATA_MODE]; window.history.pushState(null, '', _modePath(m)); setAltSwitching(true); _setDataMode(m); }}
-              title={DATA_100M ? "100M: just Aug 18 00:00 - Aug 30 00:00 EDT, separate from the other data. Click for Real Data" : ALT_SCEN ? "Alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT. Click for 100M" : "Real data. Click for the alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT"}
+              title={DATA_100M ? "100M: just Aug 18 00:00 - Aug 30 00:00 EDT, separate from the other data. Click for Real Data" : ALT_SCEN ? `Alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT. Click for ${_DATA_MODE_LABEL[_DATA_MODE_NEXT.alt]}` : "Real data. Click for the alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT"}
               style={{ background:DATA_100M?"#2f2510":ALT_SCEN?"#2a1a35":"transparent", color:DATA_100M?"#e3b85c":ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(DATA_100M?"#5c4a1e":ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN||DATA_100M?600:400, opacity:altSwitching?0.6:1 }}>{altSwitching ? "Switching…" : _DATA_MODE_LABEL[DATA_MODE]}</button>
           </div>
 
@@ -8201,10 +8250,11 @@ export default function SocialBladeLive() {
                 {view==="flare" && <button onClick={()=>setFlareNewsFeed(v=>!v)} style={{ background:flareNewsFeed?"#1a2535":"transparent", color:flareNewsFeed?"#7cb9f7":"#777", border:"1px solid "+(flareNewsFeed?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>News Feed</button>}
                 {view==="socialblade" && <button onClick={()=>setSbDark(v=>!v)} style={{ background:"transparent", color:"#999", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{sbDark?"Light Mode":"Dark Mode"}</button>}
                 {view==="socialblade" && <button onClick={()=>setSbOvertake(v=>!v)} style={{ background:sbOvertake?"#1a2535":"transparent", color:sbOvertake?"#9bbfdf":"#777", border:"1px solid "+(sbOvertake?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Predict Overtake</button>}
-                {view==="socialblade" && <label title="Window (days) of the main Sub Gap chart" style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:12,color:"#777",marginLeft:4}}>
+                {view==="socialblade" && <label title="Window (days) of the main Sub Gap chart. 0 = fixed reset points instead of a rolling window" style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:12,color:"#777",marginLeft:4}}>
                   Sub Gap Window
-                  <input type="number" min={1} step={1} value={sbGapWin}
-                    onChange={e=>{ const v=Math.round(Number(e.target.value)); if (v>=1) setSbGapWin(v); }}
+                  <input type="number" min={0} step={1} value={sbGapDraft ?? sbGapWin}
+                    onChange={e=>{ setSbGapDraft(e.target.value); const v=Math.round(Number(e.target.value)); if (e.target.value!==""&&v>=0) setSbGapWin(v); }}
+                    onBlur={()=>setSbGapDraft(null)}
                     style={{width:44,background:"#0a0c14",color:"#9bbfdf",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 4px",fontSize:12,fontFamily:"inherit"}}/>
                   d
                 </label>}
@@ -8613,8 +8663,12 @@ export default function SocialBladeLive() {
           sepX: 942,
           orange: "#c24928",
           gray: "#373737",
-          blocks: showTsOverMode ? [
-            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:41,  pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xMin:tMinMusic1h, xMax:curTime },
+          blocks: DATA_100M ? [
+            { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:41,  pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xMin:tMinTs1h,   xMax:tsTime  },
+            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:262, pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xMin:tMinMusic1h, xMax:curTime },
+            { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:490, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xMin:tMinPdp1h,  xMax:pdpTime },
+          ] : showTsOverMode ? [
+            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:41, pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xMin:tMinMusic1h, xMax:curTime },
             { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:262, pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xMin:tMinTs1h,   xMax:tsTime  },
             { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:490, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xMin:tMinPdp1h,  xMax:pdpTime },
           ] : [
@@ -8678,17 +8732,18 @@ export default function SocialBladeLive() {
 
           {/* === MIDDLE COLUMN TOP: Music/PDP gap (until TS overtakes) or Music/TS gap (after) === */}
           {(() => {
-            const top1hData   = showTsOverMode ? musicTsGap1hData   : musicPdpGap1hData;
-            const top1dData   = showTsOverMode ? musicTsGap1dData   : musicPdpGap1dData;
-            const topHistData = showTsOverMode ? musicTsHistGapData  : musicPdpHistGapData;
-            const topCurGap   = showTsOverMode
+            const top1hData   = DATA_100M ? m100TopGap1hData : showTsOverMode ? musicTsGap1hData   : musicPdpGap1hData;
+            const top1dData   = DATA_100M ? m100TopGap1dData : showTsOverMode ? musicTsGap1dData   : musicPdpGap1dData;
+            const topHistData = DATA_100M ? m100TopHistData  : showTsOverMode ? musicTsHistGapData  : musicPdpHistGapData;
+            const _musicCurGap = showTsOverMode
               ? (displayMusic != null && displayTt != null ? displayMusic - displayTt : null)
               : (displayMusic != null && displayPt != null ? displayMusic - displayPt : null);
+            const topCurGap   = DATA_100M && _musicCurGap != null ? -_musicCurGap : _musicCurGap;
             const topAxis     = roundGapAxis(topHistData, topCurGap);
-            const topLabel    = showTsOverMode ? "Music/TS Sub Gap" : "Music/PDP Sub Gap";
-            const topVsLabel  = showTsOverMode ? "Music" : "Music";
-            const dom1h = sDomMusicGap1h;   // rounded + eased, like the PDP/TS gap charts
-            const dom1d = sDomMusicGap1d;
+            const topLabel    = DATA_100M ? "TS/Music Sub Gap" : showTsOverMode ? "Music/TS Sub Gap" : "Music/PDP Sub Gap";
+            const topVsLabel  = DATA_100M ? "T-Series" : "Music";
+            const dom1h = DATA_100M ? _negDom(sDomMusicGap1h) : sDomMusicGap1h;   // rounded + eased, like the PDP/TS gap charts
+            const dom1d = DATA_100M ? _negDom(sDomMusicGap1d) : sDomMusicGap1d;
             return (<>
               <div style={{ position:"absolute", left:577, top:20, fontFamily:"Roboto, sans-serif", fontWeight:400, fontSize:15, color:"#fff" }}>1hr Sub Gap</div>
               <div style={{ position:"absolute", left:784, top:20, fontFamily:"Roboto, sans-serif", fontWeight:400, fontSize:15, color:"#fff" }}>1 Day Sub Gap</div>
@@ -8711,7 +8766,7 @@ export default function SocialBladeLive() {
                 </ResponsiveContainer>
               </div>
               <div style={{ position:"absolute", left:546, top:127, fontFamily:"Roboto, sans-serif", fontWeight:500, fontSize:20, color:"#fff" }}>
-                {topLabel}: {topVsLabel}: {topCurGap != null ? (topCurGap >= 0 ? "+" : "") + Math.abs(topCurGap).toLocaleString() : "-"}
+                {topLabel}: {topVsLabel}: {topCurGap != null ? (topCurGap >= 0 ? "+" : "−") + Math.abs(topCurGap).toLocaleString() : "-"}
               </div>
               <div style={{ position:"absolute", left:473, top:172, width:469, height:225, overflow:"hidden" }}>
                 <ResponsiveContainer width="100%" height="100%">
@@ -8807,7 +8862,7 @@ export default function SocialBladeLive() {
               return fmtPredDate(curTime + (gap / (chaserRate - targetRate)) * 60000);
             };
             const passLabel = showTsOverMode ? "TS Pass Music" : (showMidMode || v2ForcedPreTrigger) ? "TS Pass PDP" : "PDP Pass Music";
-            const headers = ["Subs/min","PewDiePie","T-Series","Music", passLabel];
+            const headers = DATA_100M ? ["Subs/min","PewDiePie","T-Series","Music"] : ["Subs/min","PewDiePie","T-Series","Music", passLabel];
             const charPx = 7, charPad = 10;
             const maxRowLen = Math.max(...V2.tblRows.map(r => r.length));
             const rawW = headers.map((h,i) => (i === 0 ? Math.max(h.length, maxRowLen) : h.length) * charPx + charPad);
@@ -8832,7 +8887,7 @@ export default function SocialBladeLive() {
                       <td style={cellS(ri, 1)}>{subsPerMinTable.pdp[ri] != null ? fmtSpm(subsPerMinTable.pdp[ri]) : "-"}</td>
                       <td style={cellS(ri, 2)}>{subsPerMinTable.ts[ri]  != null ? fmtSpm(subsPerMinTable.ts[ri])  : "-"}</td>
                       <td style={cellS(ri, 3)}>{subsPerMinTable.music?.[ri] != null ? fmtSpm(subsPerMinTable.music[ri]) : "-"}</td>
-                      <td style={cellS(ri, 4)}>{predEta(ri)}</td>
+                      {!DATA_100M && <td style={cellS(ri, 4)}>{predEta(ri)}</td>}
                     </tr>
                   ))}
                 </tbody>

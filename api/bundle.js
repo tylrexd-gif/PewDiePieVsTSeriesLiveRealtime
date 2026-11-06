@@ -15,8 +15,12 @@ function parseNum(s) {
 function parseDate(s) {
   const clean = s.trim().replace(/:$/, '');
   const [datePart, timePart] = clean.split(' ');
-  const [mo, dy, yr] = datePart.split('/').map(Number);
   const hr = timePart ? parseInt(timePart) : 0;
+  if (datePart.includes('-')) {
+    const [yr, mo, dy] = datePart.split('-').map(Number);
+    return Date.UTC(yr, mo - 1, dy, hr, 0, 0);
+  }
+  const [mo, dy, yr] = datePart.split('/').map(Number);
   return Date.UTC(yr, mo - 1, dy, hr, 0, 0);
 }
 
@@ -47,6 +51,15 @@ function parseAltAudits(text) {
     const cols = line.split(',');
     return { ms: +cols[0], channel: cols[2], delta: +cols[3] };
   });
+}
+
+// PVT Real Data Hourly.csv -> [ms, pdp, ts]: history for the 100M mode's long lookbacks.
+// Only its 30 days before Aug 18 are ever read.
+function parseM100History(text) {
+  return text.trim().split('\n').slice(1).map(line => {
+    const m = line.match(/^([^,]+),"?([\d,]+)"?,"?([\d,]+)"?/);
+    return m && [parseDate(m[1]), parseNum(m[2]), parseNum(m[3])];
+  }).filter(r => r && r[0] >= Date.UTC(2019, 6, 18));
 }
 
 function buildDataBundle() {
@@ -81,6 +94,10 @@ function buildDataBundle() {
     })(),
     FTV_ALT: (() => {
       try { return parseSimpleSheet(read('FTV_Alt.csv')); }
+      catch (e) { return []; }
+    })(),
+    M100_HIST: (() => {
+      try { return parseM100History(read('PVT Real Data Hourly.csv')); }
       catch (e) { return []; }
     })(),
     YT_MUSIC_D: (() => {
