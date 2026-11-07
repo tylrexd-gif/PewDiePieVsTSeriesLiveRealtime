@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { exec } from 'child_process';
 import { packIfStale } from './scripts/pack-bin.mjs';
+import { PACK_JOBS } from './scripts/pack-jobs.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, 'dist');
@@ -19,12 +20,7 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : DATA_ONLY ? 8081 : 
 // The app loads the packed (.pvd.gz) per-second files; the .bin files are the local
 // masters. Re-pack any master that is newer than its packed copy (e.g. a fresh
 // Scenario export dropped in as scenario-pdp-ts.bin), so the app never sees stale data.
-for (const [bin, packed, startMs] of [
-  ['every_second_counts_pvt_u32le.bin', 'every_second_counts_pvt.pvd.gz', Date.UTC(2018, 9, 17, 4, 0, 0)],
-  ['scenario-pdp-ts.bin', 'scenario-pdp-ts.pvd.gz', undefined],   // NPT1 export: start is in its header
-  ['real-pdp-ts.bin', 'real-pdp-ts.pvd.gz', undefined],           // real-data extension (May 1 - Jun 30), NPT1
-  ['PVTS_8_18_to_8_30_u32le.bin', 'PVTS_8_18_to_8_30.pvd.gz', undefined],   // 100M mode (Aug 18 - Aug 30), NPT1
-]) {
+for (const [bin, packed, startMs] of PACK_JOBS) {
   try {
     const r = packIfStale(path.join(ROOT, 'data', bin), path.join(ROOT, 'data', packed), startMs);
     if (r) console.log(`Packed ${bin} -> ${packed}: ${(r.inBytes / 1e6).toFixed(1)} MB -> ${(r.outBytes / 1e6).toFixed(1)} MB`);

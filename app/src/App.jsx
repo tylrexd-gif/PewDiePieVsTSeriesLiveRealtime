@@ -4217,6 +4217,35 @@ const DashRateDisplay = React.memo(({label,value,color,dc}) => {
   );
 });
 
+// Transparent box with a line of one channel's total subs over the last 60 minutes.
+// ch = 'pdp' | 'ts'; reads the installed per-second buffer every second, y-scaled to its own range.
+// LAYOUT: Dashboard card helper - see LAYOUTS.md
+const DASH_SPARK_MS = 60 * 60000, DASH_SPARK_STEP = 1000;
+const DashSpark = ({ch, curTime, color, height = 30}) => {
+  const sec = Math.floor(curTime / 1000);
+  const d = useMemo(() => {
+    const t1 = sec * 1000, pts = [];
+    for (let t = t1 - DASH_SPARK_MS; t < t1; t += DASH_SPARK_STEP) pts.push(realDataAt(t)?.[ch] ?? null);
+    pts.push(realDataAt(t1)?.[ch] ?? null);
+    const v = pts.filter(x => x != null);
+    if (v.length < 2) return null;
+    const lo = Math.min(...v), hi = Math.max(...v), span = hi - lo || 1;
+    let path = "";
+    pts.forEach((x, i) => {
+      if (x == null) return;
+      path += (path ? "L" : "M") + (i / (pts.length - 1) * 100).toFixed(2) + " " + (100 - (x - lo) / span * 100).toFixed(2);
+    });
+    return path;
+  }, [sec, ch]);
+  return (
+    <div style={{width:"100%",height,boxSizing:"border-box",padding:"3px 4px",background:"transparent"}}>
+      {d && <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{display:"block",width:"100%",height:"100%",overflow:"visible",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>
+        <path d={d} fill="none" stroke={color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" strokeLinejoin="round"/>
+      </svg>}
+    </div>
+  );
+};
+
 // Returns ReferenceDot elements for the last visible point on each line.
 // Monotone cubic (Fritsch-Carlson) interpolation matching recharts type="monotone".
 // Finds the 4 surrounding points and applies hermite cubic with monotone slope constraints.
@@ -7736,10 +7765,13 @@ export default function SocialBladeLive() {
           <div style={{paddingBottom:8,marginBottom:0}}>
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
               <img src={chanA.icon} alt={chanA.name} style={{width:62,height:62,borderRadius:"50%",border:"3px solid "+chanA.color,objectFit:"cover",flexShrink:0}}/>
-              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                <div style={{fontSize:28,fontWeight:700,color:chanA.color,lineHeight:1.1}}>{chanA.name}</div>
-                <span style={{fontSize:24,visibility:leadingIsA?"visible":"hidden"}}>👑</span>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <div style={{fontSize:28,fontWeight:700,color:chanA.color,lineHeight:1.1}}>{chanA.name}</div>
+                  <span style={{fontSize:24,visibility:leadingIsA?"visible":"hidden"}}>👑</span>
+                </div>
               </div>
+              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="pdp" curTime={curTime} color={chanA.color} height={40}/></div>
             </div>
             <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
               {dashRenderCounter(chanA.display)}
@@ -7770,10 +7802,13 @@ export default function SocialBladeLive() {
           <div style={{paddingBottom:8,marginBottom:8}}>
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
               <img src={chanB.icon} alt={chanB.name} style={{width:62,height:62,borderRadius:"50%",border:"3px solid "+chanB.color,objectFit:"cover",flexShrink:0}}/>
-              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                <div style={{fontSize:28,fontWeight:700,color:chanB.color,lineHeight:1.1}}>{chanB.name}</div>
-                <span style={{fontSize:24,visibility:leadingIsA?"hidden":"visible"}}>👑</span>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <div style={{fontSize:28,fontWeight:700,color:chanB.color,lineHeight:1.1}}>{chanB.name}</div>
+                  <span style={{fontSize:24,visibility:leadingIsA?"hidden":"visible"}}>👑</span>
+                </div>
               </div>
+              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="ts" curTime={curTime} color={chanB.color} height={40}/></div>
             </div>
             <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
               {dashRenderCounter(chanB.display)}
@@ -7870,6 +7905,7 @@ export default function SocialBladeLive() {
                     <div style={{fontSize:28,fontWeight:700,color:chanA.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanA.name}</div>
                     <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"visible":"hidden",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
                   </div>
+                  <div style={{width:150,marginTop:3}}><DashSpark ch="pdp" curTime={curTime} color={chanA.color} height={40}/></div>
                 </div>
                 {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
                   {[0,1,2].map(i=>(
@@ -7894,6 +7930,7 @@ export default function SocialBladeLive() {
                     <div style={{fontSize:28,fontWeight:700,color:chanB.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanB.name}</div>
                     <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"hidden":"visible",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
                   </div>
+                  <div style={{width:150,marginTop:3}}><DashSpark ch="ts" curTime={curTime} color={chanB.color} height={40}/></div>
                 </div>
                 {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
                   {[0,1,2].map(i=>(
@@ -9071,6 +9108,7 @@ export default function SocialBladeLive() {
                   {pdpLeading && <span style={{ position:"absolute", left:"100%", top:"50%", transform:"translateY(-50%)", marginLeft:6, fontSize:28 }}>👑</span>}
                   <div style={{ fontSize:34, fontWeight:700, color:eDC.PDP, lineHeight:1.1 }}>PewDiePie</div>
                 </div>
+                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="pdp" curTime={curTime} color={eDC.PDP}/></div>
                 <div className="sub-count" style={{ fontSize:counterFontSize, fontWeight:800, fontVariantNumeric:"tabular-nums", color:eDC.TEXT, letterSpacing:0, lineHeight:1, marginTop:0 }}>
                   {dashRenderCounter(displayPt)}
                 </div>
@@ -9094,6 +9132,7 @@ export default function SocialBladeLive() {
                   <div style={{ fontSize:34, fontWeight:700, color:eDC.TS, lineHeight:1.1 }}>T-Series</div>
                   {!pdpLeading && <span style={{ position:"absolute", right:"100%", top:"50%", transform:"translateY(-50%)", marginRight:6, fontSize:28 }}>👑</span>}
                 </div>
+                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="ts" curTime={curTime} color={eDC.TS}/></div>
                 <div className="sub-count" style={{ fontSize:counterFontSize, fontWeight:800, fontVariantNumeric:"tabular-nums", color:eDC.TEXT, letterSpacing:0, lineHeight:1, marginTop:0 }}>
                   {dashRenderCounter(displayTt)}
                 </div>
