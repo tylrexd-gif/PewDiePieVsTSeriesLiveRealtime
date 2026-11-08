@@ -4221,12 +4221,14 @@ const DashRateDisplay = React.memo(({label,value,color,dc}) => {
 // ch = 'pdp' | 'ts'; reads the installed per-second buffer every second, y-scaled to its own range.
 // LAYOUT: Dashboard card helper - see LAYOUTS.md
 const DASH_SPARK_MS = 60 * 60000, DASH_SPARK_STEP = 1000;
-const DashSpark = ({ch, curTime, color, height = 30}) => {
+// stripAudits (Filter Audits): plot the audit-filtered total (minus getRdCumAudit).
+const DashSpark = ({ch, curTime, color, height = 30, stripAudits = false}) => {
   const sec = Math.floor(curTime / 1000);
   const d = useMemo(() => {
     const t1 = sec * 1000, pts = [];
-    for (let t = t1 - DASH_SPARK_MS; t < t1; t += DASH_SPARK_STEP) pts.push(realDataAt(t)?.[ch] ?? null);
-    pts.push(realDataAt(t1)?.[ch] ?? null);
+    const at = (t) => { const v = realDataAt(t)?.[ch]; return v == null ? null : stripAudits ? v - getRdCumAudit(t, ch) : v; };
+    for (let t = t1 - DASH_SPARK_MS; t < t1; t += DASH_SPARK_STEP) pts.push(at(t));
+    pts.push(at(t1));
     const v = pts.filter(x => x != null);
     if (v.length < 2) return null;
     const lo = Math.min(...v), hi = Math.max(...v), span = hi - lo || 1;
@@ -4236,7 +4238,7 @@ const DashSpark = ({ch, curTime, color, height = 30}) => {
       path += (path ? "L" : "M") + (i / (pts.length - 1) * 100).toFixed(2) + " " + (100 - (x - lo) / span * 100).toFixed(2);
     });
     return path;
-  }, [sec, ch]);
+  }, [sec, ch, stripAudits]);
   return (
     <div style={{width:"100%",height,boxSizing:"border-box",padding:"3px 4px",background:"transparent"}}>
       {d && <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{display:"block",width:"100%",height:"100%",overflow:"visible",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>
@@ -4569,6 +4571,25 @@ const _expNiceStep = (range, target) => {
 };
 const _expFmtSpan = (sec) => sec < 120 ? Math.round(sec) + "s" : sec < 7200 ? Math.round(sec / 60) + "m" : sec < 172800 ? (sec / 3600).toFixed(sec < 36000 ? 1 : 0) + "h" : (sec / 86400).toFixed(1) + "d";
 
+// Audit hover labels ("14:03:22 Audit PDP: -1,234"), shared by the dashboard gain
+// charts and the Explorer. An audit lands in the per-second data at the first whole
+// second at/after its ms, so that is the second it is labelled (and matched) at.
+const _auditSec = (a) => Math.ceil(a.ms / 1000) * 1000;
+const _auditName = (ch) => ch === 'pdp' ? "PDP" : "T-S";
+const _AUDIT_ROWS_MAX = 6;
+const _auditRows = (list, d) => [
+  ...list.slice(0, _AUDIT_ROWS_MAX).map((a, i) => {
+    const dt = _expLocal(_auditSec(a));
+    return (
+      <div key={"aud" + i} style={{ color: a.channel === 'pdp' ? d.PDP : d.TS, fontWeight: 600, marginTop: i === 0 ? 4 : 0 }}>
+        <span style={{ color: d.DIM, fontWeight: 400 }}>{_p2(dt.getUTCHours()) + ":" + _p2(dt.getUTCMinutes()) + ":" + _p2(dt.getUTCSeconds()) + " Audit "}</span>
+        {_auditName(a.channel)}: {(a.magnitude >= 0 ? "+" : "") + Math.round(a.magnitude).toLocaleString()}
+      </div>
+    );
+  }),
+  ...(list.length > _AUDIT_ROWS_MAX ? [<div key="audMore" style={{ color: d.DIM }}>{"+" + (list.length - _AUDIT_ROWS_MAX) + " more audits"}</div>] : []),
+];
+
 // Interactive whole-dataset chart: wheel zooms around the cursor, drag pans, double-click resets.
 const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
   const d = dc || DC;
@@ -4712,6 +4733,17 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
     if (i < 0 || i >= REAL_DATA_PAIR_COUNT) return null;
     return fns.map((fn) => fn(i));
   })() : null;
+  // Audits: hovering within 4px of an audit (or on its second, zoomed in) labels it on
+  // every chart; Filter Audits gain charts also draw a dotted line per audit.
+  // Subs/gain honour the PDP/TS filter; the gap shows both channels.
+  const auditChs = spec.kind === "gap" ? ["pdp", "ts"] : visIdx.map(i => i === 0 ? "pdp" : "ts");
+  const auditAll = useMemo(() => (spec.excess ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a => auditChs.includes(a.channel)),
+    [spec.excess, visKey, spec.kind]);
+  const auditMarks = spec.kind === "gain" && spec.strip;
+  const hoverAudits = (hover && hoverVals) ? (() => {
+    const tol = 4 / pw * (view[1] - view[0]);
+    return tol < 500 ? auditAll.filter(a => _auditSec(a) === hover.t) : auditAll.filter(a => Math.abs(_auditSec(a) - hover.rawT) <= tol);
+  })() : [];
 
   useLayoutEffect(() => {
     const cv = canvasRef.current;
@@ -4796,6 +4828,19 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
       });
       ctx.globalCompositeOperation = "source-over";
     }
+    if (auditMarks) {
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 4]);
+      ctx.globalAlpha = 0.45;
+      for (const a of auditAll) {
+        if (a.ms < t0 || a.ms > t1) continue;
+        const x = Math.round(X(a.ms)) + 0.5;
+        ctx.strokeStyle = a.channel === "pdp" ? d.PDP : d.TS;
+        ctx.beginPath(); ctx.moveTo(x, EXP_PAD.t); ctx.lineTo(x, EXP_PAD.t + ph); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.setLineDash([]);
+    }
     if (curTime >= t0 && curTime <= t1) {
       const x = Math.round(X(curTime)) + 0.5;
       ctx.strokeStyle = "rgba(245,197,66,0.8)";
@@ -4824,7 +4869,8 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
     const x = e.clientX - r.left - EXP_PAD.l;
     if (x < 0 || x > pw) { setHover(null); return; }
     const [t0, t1] = view;
-    setHover({ t: Math.round((t0 + x / pw * (t1 - t0)) / 1000) * 1000, x: x + EXP_PAD.l });
+    const rawT = t0 + x / pw * (t1 - t0);
+    setHover({ t: Math.round(rawT / 1000) * 1000, rawT, x: x + EXP_PAD.l });
   };
   const zoomTo = (sec) => {
     const [t0, t1] = view;
@@ -4848,6 +4894,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
             {lines[i].name}: {v == null ? "—" : (spec.kind !== "subs" && v >= 0 ? "+" : "") + Math.round(v).toLocaleString()}
           </div>
         ))}
+        {_auditRows(hoverAudits, d)}
       </div>
     );
   }
@@ -4894,7 +4941,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
 };
 
 // LAYOUT: Dashboard chart helper - see LAYOUTS.md
-const DashTooltip =({active,payload,label,fmtMode,dc,flare,flareDark}) => {
+const DashTooltip =({active,payload,label,fmtMode,dc,flare,flareDark,audits,auditTol}) => {
   if (!active||!payload?.length) return null;
   const d = dc || DC;
   const useLightBg = flare && !flareDark;
@@ -4909,6 +4956,7 @@ const DashTooltip =({active,payload,label,fmtMode,dc,flare,flareDark}) => {
       {payload.map((p,i)=>(
         <div key={i} style={{color:p.color,fontWeight:600}}>{p.name}: {fmt(p.value,fmtMode)}</div>
       ))}
+      {audits && _auditRows(audits.filter(a => Math.abs(a.ms - label) <= auditTol), d)}
     </div>
   );
 };
@@ -7502,6 +7550,19 @@ export default function SocialBladeLive() {
     </DashExpandOverlay>,
     document.body);
 
+  // Audit hover labels for a dashboard chart's tooltip, always on (independent of
+  // Filter Audits). A point labels the audits within ~0.5% of the window or half a
+  // sample step of it, so the tooltip's nearest point always reaches each audit.
+  // Gap charts show both channels; the others honour the PDP/TS filter.
+  const dashAuditTip = (data, tMin, gap = false) => {
+    if (appMode !== 'real' || !data || !data.length) return {};
+    const step = data.length > 1 ? (data[data.length - 1].t - data[0].t) / (data.length - 1) : 0;
+    const auditTol = Math.max((curTime - tMin) / 200, step / 2 + 500);
+    const audits = (exChartsOn ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a =>
+      a.ms >= tMin - auditTol && a.ms <= curTime && (gap || dashChanFilter === 'both' || !dashChanFilter || a.channel === dashChanFilter));
+    return { audits, auditTol };
+  };
+
   // LAYOUT: Dashboard chart card renderer - see LAYOUTS.md
   const renderDashGainChart = (ci, h, cfg) => {
     // 5min toggle: swap ci=1 (10min lookback) to ci=8 (5min lookback) when enabled
@@ -7631,7 +7692,7 @@ export default function SocialBladeLive() {
             {allMidnightsG.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
             {auditLines.map((a,i)=>{ const ch=appMode==='real'?a.channel:a[1]; const ts=appMode==='real'?a.ms:a[3]; const m=auditChans.find(mm=>mm.ch===ch); return <ReferenceLine key={"aud"+i} x={ts} stroke={m.color} strokeWidth={1} strokeDasharray="2 4" strokeOpacity={0.45} ifOverflow="hidden"/>; })}
             <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
-            {!isRTMode && <Tooltip content={<DashTooltip dc={eDC}/>}/>}
+            {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gdLive, tMin)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1}/>
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.lineA.key} stroke={cfg.lineA.color} strokeWidth={1.8} dot={false} name={cfg.lineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.lineB.key} stroke={cfg.lineB.color} strokeWidth={1.8} dot={false} name={cfg.lineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
@@ -7686,7 +7747,7 @@ export default function SocialBladeLive() {
             <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksGap} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {allMidnightsGap.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
             <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
-            {!isRTMode && <Tooltip content={<DashTooltip dc={eDC}/>}/>}
+            {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gd, tMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey="gap" stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.gapName} isAnimationActive={false}/>
             {endDots(gd, curTime, [{key:'gap',color:'#e2e5eb',exact:cfg.exactGap}])}
@@ -7771,7 +7832,7 @@ export default function SocialBladeLive() {
                   <span style={{fontSize:24,visibility:leadingIsA?"visible":"hidden"}}>👑</span>
                 </div>
               </div>
-              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="pdp" curTime={curTime} color={chanA.color} height={40}/></div>
+              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="pdp" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
             </div>
             <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
               {dashRenderCounter(chanA.display)}
@@ -7808,7 +7869,7 @@ export default function SocialBladeLive() {
                   <span style={{fontSize:24,visibility:leadingIsA?"hidden":"visible"}}>👑</span>
                 </div>
               </div>
-              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="ts" curTime={curTime} color={chanB.color} height={40}/></div>
+              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="ts" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
             </div>
             <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
               {dashRenderCounter(chanB.display)}
@@ -7905,7 +7966,7 @@ export default function SocialBladeLive() {
                     <div style={{fontSize:28,fontWeight:700,color:chanA.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanA.name}</div>
                     <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"visible":"hidden",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
                   </div>
-                  <div style={{width:150,marginTop:3}}><DashSpark ch="pdp" curTime={curTime} color={chanA.color} height={40}/></div>
+                  <div style={{width:150,marginTop:3}}><DashSpark ch="pdp" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
                 </div>
                 {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
                   {[0,1,2].map(i=>(
@@ -7930,7 +7991,7 @@ export default function SocialBladeLive() {
                     <div style={{fontSize:28,fontWeight:700,color:chanB.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanB.name}</div>
                     <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"hidden":"visible",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
                   </div>
-                  <div style={{width:150,marginTop:3}}><DashSpark ch="ts" curTime={curTime} color={chanB.color} height={40}/></div>
+                  <div style={{width:150,marginTop:3}}><DashSpark ch="ts" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
                 </div>
                 {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
                   {[0,1,2].map(i=>(
@@ -8077,7 +8138,7 @@ export default function SocialBladeLive() {
             <XAxis dataKey="t" type="number" domain={totXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
             <YAxis tickFormatter={v=>fmt(v,cfg.totalFmt||"subs")} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={totDom} allowDataOverflow ticks={totTicks}/>
-            {!isRTMode && <Tooltip content={<DashTooltip fmtMode={cfg.totalFmt||"subs"} dc={eDC}/>}/>}
+            {!isRTMode && <Tooltip content={<DashTooltip fmtMode={cfg.totalFmt||"subs"} dc={eDC} {...dashAuditTip(cfg.totalData, totTMin)}/>}/>}
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.totalLineA.key} stroke={cfg.totalLineA.color} strokeWidth={2} dot={false} name={cfg.totalLineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.totalLineB.key} stroke={cfg.totalLineB.color} strokeWidth={2} dot={false} name={cfg.totalLineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {endDots(cfg.totalData, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.totalLineA.key,color:cfg.totalLineA.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.totalLineB.key,color:cfg.totalLineB.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactB}]:[])])}
@@ -8093,7 +8154,7 @@ export default function SocialBladeLive() {
             <XAxis dataKey="t" type="number" domain={gapXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
             <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={gapDom} allowDataOverflow ticks={gapTicks}/>
-            {!isRTMode && <Tooltip content={<DashTooltip dc={eDC}/>}/>}
+            {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(cfg.totalData, totTMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey={cfg.totalGapKey} stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.totalGapName} isAnimationActive={false}/>
             {endDots(cfg.totalData, curTime, [{key:cfg.totalGapKey,color:'#e2e5eb',exact:cfg.exactGap}])}
@@ -9108,7 +9169,7 @@ export default function SocialBladeLive() {
                   {pdpLeading && <span style={{ position:"absolute", left:"100%", top:"50%", transform:"translateY(-50%)", marginLeft:6, fontSize:28 }}>👑</span>}
                   <div style={{ fontSize:34, fontWeight:700, color:eDC.PDP, lineHeight:1.1 }}>PewDiePie</div>
                 </div>
-                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="pdp" curTime={curTime} color={eDC.PDP}/></div>
+                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="pdp" curTime={curTime} stripAudits={effectiveFilterAudits} color={eDC.PDP}/></div>
                 <div className="sub-count" style={{ fontSize:counterFontSize, fontWeight:800, fontVariantNumeric:"tabular-nums", color:eDC.TEXT, letterSpacing:0, lineHeight:1, marginTop:0 }}>
                   {dashRenderCounter(displayPt)}
                 </div>
@@ -9132,7 +9193,7 @@ export default function SocialBladeLive() {
                   <div style={{ fontSize:34, fontWeight:700, color:eDC.TS, lineHeight:1.1 }}>T-Series</div>
                   {!pdpLeading && <span style={{ position:"absolute", right:"100%", top:"50%", transform:"translateY(-50%)", marginRight:6, fontSize:28 }}>👑</span>}
                 </div>
-                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="ts" curTime={curTime} color={eDC.TS}/></div>
+                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="ts" curTime={curTime} stripAudits={effectiveFilterAudits} color={eDC.TS}/></div>
                 <div className="sub-count" style={{ fontSize:counterFontSize, fontWeight:800, fontVariantNumeric:"tabular-nums", color:eDC.TEXT, letterSpacing:0, lineHeight:1, marginTop:0 }}>
                   {dashRenderCounter(displayTt)}
                 </div>
