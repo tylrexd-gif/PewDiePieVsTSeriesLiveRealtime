@@ -888,7 +888,35 @@ async function _loadMergedExport(file, exportFile, pairCount) {
     }
   }
   for (let j = last + 1; j < pairCount; j++) { out[j * 2] = out[last * 2]; out[j * 2 + 1] = out[last * 2 + 1]; }
+  // Real timeline only (not the Scenario export): overlay the real-data patches.
+  if (exportFile === EXT_FILE) await _applyRealPatches(out, pairCount);
   return out;
+}
+
+// - REAL-DATA PATCHES -
+// Separately stored pieces of real per-second data, spliced over the real timeline at load
+// time so they survive a regenerated real-pdp-ts export. Each file is a packed PVD1
+// (.pvd.gz, see app/scripts/pack-bin.mjs) of [pdp, ts] per second on the real-pdp-ts clock
+// (US Eastern labelled as UTC, shifted by ALT_TZ_SHIFT_MS); every second it covers replaces
+// the loaded data. Applied in list order (a later file wins where they overlap). A file that
+// fails to load is skipped. Audits are not touched: real-pdp-ts-audits.csv still lists them.
+const REAL_PATCH_FILES = [
+  'real-patch-2019-05-29.pvd.gz',   // May 29 2019 02:00:00 - 06:00:00 EDT, both channels
+];
+async function _applyRealPatches(out, pairCount) {
+  for (const file of REAL_PATCH_FILES) {
+    let pk;
+    try { pk = unpackPVD(await gunzipIfNeeded(await _fetchPacked('/data/' + file)), Int32Array); }
+    catch { continue; }
+    if (pk.stepMs !== 1000 || pk.nCh < 2) continue;
+    const s0 = Math.round((pk.startMs + ALT_TZ_SHIFT_MS - REAL_TL_START_MS) / 1000);
+    for (let i = 0; i < pk.n; i++) {
+      const j = s0 + i;
+      if (j < 0 || j >= pairCount) continue;
+      out[j * 2] = pk.data[i * pk.nCh];
+      out[j * 2 + 1] = pk.data[i * pk.nCh + 1];
+    }
+  }
 }
 
 // Channel Ahead (and Flare's takeover counts): every lead change, computed from the
@@ -1868,6 +1896,61 @@ const rtRollDuration = (periodSec, em) => {
   const m = em > 0 ? em : 1;
   return Math.max(10, periodSec * 1000 / m);
 };
+// Odometer roll length: the tick period, capped at 2 sim-seconds (a 3s interval
+// still rolls for 2s, then holds until the next tick).
+const RT_ROLL_MAX_SEC = 2;
+const rtRollAnimDuration = (periodSec, em) => rtRollDuration(Math.min(periodSec, RT_ROLL_MAX_SEC), em);
+
+// Chart update tween: on each new chart time (RT tick) the x-axis eases over to the
+// new time and the y-axis range eases to its new bounds (durMs, ease-out), then holds
+// still. render(tShown, anim) gets the sliding axis time; anim.target is the new data
+// time. Snaps on a seek (resetKey), a big jump, or when inactive.
+const SMOOTH_MAX_JUMP_MS = 10 * 60000;
+const CHART_TWEEN_MS = 500;
+const _easeOutCubic = k => 1 - Math.pow(1 - k, 3);
+const ChartTween = ({ target, active, durMs, resetKey, render }) => {
+  const [, bump] = useState(0);
+  const ref = useRef(null);
+  if (!ref.current) ref.current = { target, tPrev: target, t0: 0, key: resetKey, mem: {} };
+  const st = ref.current;
+  if (target !== st.target || resetKey !== st.key) {
+    const snap = !active || st.key !== resetKey || Math.abs(target - st.target) > SMOOTH_MAX_JUMP_MS;
+    st.tPrev = st.target; st.target = target; st.key = resetKey;
+    st.t0 = snap ? 0 : performance.now();
+    for (const m of Object.values(st.mem)) m.domFrom = snap ? null : m.domShown;
+  }
+  const k = (active && st.t0) ? _easeOutCubic(Math.min(1, (performance.now() - st.t0) / durMs)) : 1;
+  useEffect(() => {
+    if (!(active && st.t0)) return;
+    let id;
+    const loop = () => { bump(x => x + 1); if (performance.now() - st.t0 < durMs) id = requestAnimationFrame(loop); };
+    id = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(id);
+  }, [target, active, resetKey, durMs]);
+  const mem = id => st.mem[id] || (st.mem[id] = {});
+  const anim = {
+    target,
+    dom: (id, dom) => { const m = mem(id); const f = m.domFrom; const out = (k < 1 && f) ? [f[0] + (dom[0] - f[0]) * k, f[1] + (dom[1] - f[1]) * k] : dom; m.domShown = out; return out; },
+  };
+  // The x-axis shift eases too: the chart time slides from the previous tick to the new one.
+  const tShown = (active && st.t0) ? st.tPrev + (target - st.tPrev) * k : target;
+  return render(tShown, anim);
+};
+// Hidden lead for the short live charts: the axis ends ~3 samples before the newest
+// data, so the newest points (and the live end point that is replaced each update)
+// sit past the right edge. A monotone segment's shape depends on the points on both
+// sides of it, so every visible segment then already has its settled neighbours and
+// new data never reshapes what is on screen.
+const _hiddenLeadMs = (data, tNew) => {
+  if (!data || data.length < 5) return 0;
+  let n = data.length;
+  while (n > 0 && data[n - 1].t > tNew) n--;
+  if (n < 5) return 0;
+  const step = Math.max(data[n - 2].t - data[n - 3].t, data[n - 3].t - data[n - 4].t);
+  return step > 0 ? 3 * step : 0;
+};
+// Ticks of the target range that fall inside the (animating) shown range.
+const _ticksIn = (ticks, dom) => ticks.filter(v => v >= dom[0] && v <= dom[1]);
 
 const initialPlayback = { playing:false, reverse:false, speedMode:"rt", mult:1, dyn:false, desync:0, seekToken:0, minuteSnap:false };
 
@@ -2609,9 +2692,35 @@ const OdometerDigit = ({ fromDigit, totalSteps, duration, animKey }) => {
   );
 };
 
+// Shared casino-counter layout. The root is an inline-block with line-height 1, so its
+// top-aligned 1em digit boxes sit on the surrounding text's baseline whatever the host's
+// line-height is (a plain inline root rode up in normal-line-height text).
+const CASINO_ROOT_STYLE = { display:"inline-block", verticalAlign:"baseline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 };
+const CASINO_SIGN_STYLE = { display:"inline-block", height:"1em", lineHeight:1, verticalAlign:"top" };
+const CASINO_SEP_STYLE = { display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" };
+const CASINO_DIGIT_STYLE = { display:"inline-block", height:"1em", width:"1ch", textAlign:"center", lineHeight:1, verticalAlign:"top", marginRight:"0.0105em" };
+
+// Static (non-rolling) value in the exact casino-counter layout, so a counter looks the
+// same whether or not it is animating. Same props as CasinoCounter's value/signed/decimals.
+const CasinoStatic = ({ value, signed, decimals = 0, empty = "—" }) => {
+  if (value == null) return <span>{empty}</span>;
+  const num = Math.round(value);
+  const prefix = signed ? (num >= 0 ? "+" : "-") : "";
+  const abs = Math.abs(num);
+  const formatted = decimals ? (abs / Math.pow(10, decimals)).toFixed(decimals) : abs.toLocaleString();
+  return (
+    <span style={CASINO_ROOT_STYLE}>
+      {prefix && <span style={CASINO_SIGN_STYLE}>{prefix}</span>}
+      {formatted.split("").map((ch, i) => (ch === "," || ch === ".")
+        ? <span key={"c"+i} style={CASINO_SEP_STYLE}>{ch}</span>
+        : <span key={"d"+i} style={CASINO_DIGIT_STYLE}>{ch}</span>)}
+    </span>
+  );
+};
+
 // LAYOUT: Shared counter - see LAYOUTS.md
 // decimals: value is an integer scaled by 10^decimals (1234 with decimals=2 shows "12.34").
-const CasinoCounter = ({ value, signed, duration = 3400, seekToken = 0, decimals = 0 }) => {
+const CasinoCounter =({ value, signed, duration = 3400, seekToken = 0, decimals = 0 }) => {
   const num = value == null ? null : Math.round(value);
   const prevRef = useRef(num || 0);
   const lastSeekRef = useRef(seekToken);
@@ -2644,10 +2753,10 @@ const CasinoCounter = ({ value, signed, duration = 3400, seekToken = 0, decimals
   let dIdx = 0;
 
   return (
-    <span style={{ display:"inline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 }}>
-      {prefix && <span style={{ display:"inline-block", height:"1em", lineHeight:1, verticalAlign:"top" }}>{prefix}</span>}
+    <span style={CASINO_ROOT_STYLE}>
+      {prefix && <span style={CASINO_SIGN_STYLE}>{prefix}</span>}
       {formatted.split("").map((ch, i) => {
-        if (ch === "," || ch === ".") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>{ch}</span>;
+        if (ch === "," || ch === ".") return <span key={"c"+i} style={CASINO_SEP_STYLE}>{ch}</span>;
         const power = numDigits - 1 - dIdx; dIdx++;
         const div = Math.pow(10, power);
         const fromDigit = Math.floor(absFrom / div) % 10;
@@ -2904,10 +3013,10 @@ const FlareCasinoCounter = ({ value, signed, seekToken = 0, mult = 1, compact = 
 
   let dIdx = 0;
   return (
-    <span style={{ display:"inline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 }}>
-      {prefix && <span style={{ display:"inline-block", height:"1em", lineHeight:1, verticalAlign:"top" }}>{prefix}</span>}
+    <span style={CASINO_ROOT_STYLE}>
+      {prefix && <span style={CASINO_SIGN_STYLE}>{prefix}</span>}
       {formatted.split("").map((ch, i) => {
-        if (ch === ",") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>,</span>;
+        if (ch === ",") return <span key={"c"+i} style={CASINO_SEP_STYLE}>,</span>;
         const power = numDigits - 1 - dIdx; dIdx++;
         const { digit, frac } = colFrac(Math.pow(10, power));
         return <FlareOdoColumn key={"p"+power} digit={digit} frac={frac} />;
@@ -3178,18 +3287,7 @@ const FlareView = React.memo(({
   // shift when the mode changes or playback pauses.
   // LAYOUT: Flare counter helper - see LAYOUTS.md
   const renderFlareCount = (value) => {
-    if (!isRTMode) {
-      if (value == null) return "\u2014";
-      const formatted = Math.round(value).toLocaleString();
-      return (
-        <span style={{ display:"inline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 }}>
-          {formatted.split("").map((ch, i) => {
-            if (ch === ",") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>,</span>;
-            return <span key={"d"+i} style={{ display:"inline-block", height:"1em", width:"1ch", textAlign:"center", lineHeight:1, verticalAlign:"top", marginRight:"0.0105em" }}>{ch}</span>;
-          })}
-        </span>
-      );
-    }
+    if (!isRTMode) return <CasinoStatic value={value}/>;
     return <FlareCasinoCounter value={value} seekToken={seekToken} mult={mult}/>;
   };
 
@@ -3275,8 +3373,8 @@ const FlareView = React.memo(({
                 modes the value is static, so a plain comma-formatted string
                 avoids spinning up the rAF loop for nothing. */}
             {isRTMode
-              ? <CasinoCounter value={slowlyCount} duration={rtRollDuration(rtPeriodSec, mult)} seekToken={seekToken}/>
-              : slowlyCount.toLocaleString()}
+              ? <CasinoCounter value={slowlyCount} duration={rtRollAnimDuration(rtPeriodSec, mult)} seekToken={seekToken}/>
+              : <CasinoStatic value={slowlyCount}/>}
           </div>
           <div style={{
             position: "absolute",
@@ -4205,13 +4303,16 @@ const roundGapAxis = (data, curG) => {
 };
 
 // LAYOUT: Dashboard card helper - see LAYOUTS.md
-const DashRateDisplay = React.memo(({label,value,color,dc}) => {
+// rt (RT playback): roll the value with the dashboard's CasinoCounter (duration = roll ms).
+const DashRateDisplay = React.memo(({label,value,color,dc,rt,duration,seekToken}) => {
   const d = dc || DC;
   return (
   <div style={{textAlign:"left",width:90,flexShrink:0}}>
     <div style={{fontSize:12,color:d.DIM}}>{label}</div>
     <div style={{fontSize:14,fontWeight:700,fontVariantNumeric:"tabular-nums",color}}>
-      {value!=null?(value>=0?"+":"")+Math.round(value).toLocaleString():"\u2014"}
+      {value==null ? "\u2014"
+        : rt ? <CasinoCounter value={value} signed duration={duration} seekToken={seekToken}/>
+        : <CasinoStatic value={value} signed/>}
     </div>
   </div>
   );
@@ -4591,7 +4692,8 @@ const _auditRows = (list, d) => [
 ];
 
 // Interactive whole-dataset chart: wheel zooms around the cursor, drag pans, double-click resets.
-const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
+const EXP_AUDIT_MARK_MAX_MS = 7 * 24 * 3600000;
+const ChartExplorer = ({ spec, curTime, ready, onClose, onSeek, dc, dev, chan }) => {
   const d = dc || DC;
   const wrapRef = useRef(null), canvasRef = useRef(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -4828,7 +4930,8 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
       });
       ctx.globalCompositeOperation = "source-over";
     }
-    if (auditMarks) {
+    // Dotted audit lines only while zoomed in to <= EXP_AUDIT_MARK_MAX_MS (7 days) of view.
+    if (auditMarks && t1 - t0 <= EXP_AUDIT_MARK_MAX_MS) {
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 4]);
       ctx.globalAlpha = 0.45;
@@ -4923,7 +5026,14 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
         onMouseDown={(e) => { if (e.button !== 0) return; dragRef.current = { x: e.clientX, v: view }; setDragging(true); setHover(null); }}
         onMouseMove={onMove}
         onMouseLeave={() => setHover(null)}
-        onDoubleClick={resetView}
+        onDoubleClick={(e) => {
+          // Seek playback to the double-clicked second.
+          const r = e.currentTarget.getBoundingClientRect();
+          const x = e.clientX - r.left - EXP_PAD.l;
+          if (!onSeek || x < 0 || x > pw) return;
+          const [t0, t1] = view;
+          onSeek(Math.round((t0 + x / pw * (t1 - t0)) / 1000) * 1000);
+        }}
         style={{ flex: 1, minHeight: 0, position: "relative", cursor: dragging ? "grabbing" : "crosshair", userSelect: "none" }}>
         <canvas ref={canvasRef} style={{ position: "absolute", left: 0, top: 0, width: size.w, height: size.h }}/>
         {tip}
@@ -4933,7 +5043,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, dc, dev, chan }) => {
           </div>
         )}
         <div style={{ position: "absolute", right: EXP_PAD.r + 4, bottom: EXP_PAD.b + 6, color: "#555b70", fontSize: 10, pointerEvents: "none" }}>
-          {"scroll to zoom · drag to pan · double-click to reset"}
+          {"scroll to zoom · drag to pan · double-click to jump there"}
         </div>
       </div>
     </div>
@@ -5097,6 +5207,8 @@ const GAIN_CHARTS = [
   [1/60, 1,     "1min Gain / 1hr",   -1],   // index 6: alt layout
   [1/3600, 1/60, "1s Gain / 1min",   -0.5], // index 7: per-second mode (1s gain, 1min span, ~1s step)
   [5/60, 1,     "5min Gain / 1hr",   -5],   // index 8: 5min lookback (toggle from ci=1)
+  [5/3600, 1/60, "5s Gain / 1min",   -0.5], // index 9: per-second mode, 5s lookback (Default layout toggle)
+  [10/3600, 1/60, "10s Gain / 1min", -0.5], // index 10: per-second mode, 10s lookback (Default layout toggle)
 ];
 
 
@@ -5415,8 +5527,10 @@ async function _setDataMode(mode) {
   _onAltSwapped?.();
 }
 const _modePath = (mode) => _urlFor(mode, _urlHas('live'));
-// 100M is in the cycle on localhost only; online it is reached by its URL.
-const _DATA_MODE_NEXT = { real: 'alt', alt: DEV_MODE_ALLOWED ? '100m' : 'real', '100m': 'real' };
+// Click cycles Real <-> Alt (100M -> Real). 100M is reached only by Shift+click, and only
+// on localhost; online it is reached by its URL.
+const _DATA_MODE_NEXT = { real: 'alt', alt: 'real', '100m': 'real' };
+const _dataModeTarget = (cur, shift) => (shift && DEV_MODE_ALLOWED && cur !== '100m') ? '100m' : _DATA_MODE_NEXT[cur];
 const _DATA_MODE_LABEL = { real: 'Real Data', alt: 'Alt Scenario', '100m': '100M' };
 // localStorage key of the saved playhead: the real and Alt modes share one timeline, 100M has its own.
 const _posKey = () => DATA_100M ? 'pos100m' : 'pos';
@@ -5526,6 +5640,10 @@ export default function SocialBladeLive() {
   // charts) instead of the tight min/max - so the axis only steps at round
   // thresholds rather than drifting every frame.
   const [view, setView] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.view ?? "socialblade") : "socialblade"); // STARTUP: always SocialBlade
+  // Desync and Snap are off in the Dashboard view; the stored values stay as set
+  // (and still apply in the other views).
+  const desyncEff = view === "dashboard" ? 0 : desync;
+  const minuteSnapEff = view === "dashboard" ? false : minuteSnap;
   const [dashWin, setDashWin] = useState(() => _ss.dashWin ?? 7);
   const [sbGapWin, setSbGapWin] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.sbGapWin ?? 14) : 14); // STARTUP: always 14d
   // Text while editing the Sub Gap Window box: a lone "-" isn't a number yet, and a controlled
@@ -5536,6 +5654,9 @@ export default function SocialBladeLive() {
   // Per-second mode (standard dashboard): swaps the 1min-gain chart for a 1s-gain
   // over the last minute, and the 1hr-gap chart for a 1min gap.
   const [dashPerSecond, setDashPerSecond] = useState(() => _ss.dashPerSecond ?? false);
+  // Default layout's short gain chart lookback multiplier: 1 | 5 | 10. Shared by the
+  // 1min chart (minutes) and the /sec chart (seconds), so 10m <-> 10s etc. stay linked.
+  const [dashDefGainLb, setDashDefGainLb] = useState(() => _ss.dashDefGainLb ?? 1);
   // Dashboard chart layout: 0 = Default, 1 = Default+, 2 = Alt (former Normal).
   // dashAltLayout gates the alt renderer (layouts 0 and 1); dashAltPlus enables
   // the extra ci0/ci1 columns (layout 1). Layout 2 uses renderNormalDashboard.
@@ -5661,8 +5782,8 @@ export default function SocialBladeLive() {
     _saveSS({ speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval });
   }, [speedMode, mult, dyn, desync, minuteSnap, playing, reverse, rtInterval]);
   useEffect(() => {
-    _saveSS({ view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
-  }, [view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
+    _saveSS({ view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashDefGainLb, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareNewsFeed, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen });
+  }, [view, dashWin, sbGapWin, dashShowCharts, dashPerSecond, dashDefGainLb, dashLayout, filterAudits, showExcess, chartsExcess, flareDark, flareExtraInfo, sbDark, sbOvertake, barHidden, histStartIdx, menuOpen]);
   useEffect(() => {
     const id = setInterval(() => { _saveSS({ [_posKey()]: posRef.current }); }, 3000);
     return () => clearInterval(id);
@@ -6127,6 +6248,10 @@ export default function SocialBladeLive() {
     [_musicVsTs, musicTsGap1dData, musicPdpGap1dData, tMinGap1d, gapTime]);
   const sDomMusicGap1h = useSmoothBounds(roundDomain(domMusicGap1h), smoothDur, smoothEnabled);
   const sDomMusicGap1d = useSmoothBounds(roundDomain(domMusicGap1d), smoothDur, smoothEnabled);
+  // SB 60min total charts: plain x domains (the useSmoothBounds x-easing is not used).
+  const sXPdp1h   = [tMinPdp1h, pdpTime];
+  const sXTs1h    = [tMinTs1h, tsTime];
+  const sXMusic1h = [tMinMusic1h, curTime];
   const sDomPdp1h   = _sDomPdp1h;
   const sDomTs1h    = _sDomTs1h;
   const sDomGap1h   = _sDomGap1h;
@@ -6160,8 +6285,8 @@ export default function SocialBladeLive() {
   //   - RT, no snap: refresh at the desync MIDPOINT (rtDisplay.midT, the same
   //     slot the Sub Gap / SB counter use), not per-channel.
   //   - otherwise: curTime.
-  const tableTime = minuteSnap
-    ? (() => { const off = desync * 60000; return Math.floor((curTime - off) / 60000) * 60000 + off; })()
+  const tableTime = minuteSnapEff
+    ? (() => { const off = desyncEff * 60000; return Math.floor((curTime - off) / 60000) * 60000 + off; })()
     : (isRTMode && rtDisplay.midT != null ? rtDisplay.midT : curTime);
   const tablePos = tsToPos(tableTime);
   const tableIntIdx = Math.max(SEEK_START, Math.min(Math.floor(tablePos), maxIdx));
@@ -6174,7 +6299,7 @@ export default function SocialBladeLive() {
   // Quantize curTime to 10s buckets - rates don't change meaningfully
   // between ticks, and in rAF modes curTime fires at 60fps otherwise.
   const _curTime10s = Math.floor(curTime / 10000);
-  const _use1mInterp = speedMode === "1m" && !minuteSnap;
+  const _use1mInterp = speedMode === "1m" && !minuteSnapEff;
   const subsPerMinTable = useMemo(() => {
     const lookbacks = [1/60, 5/60, 1, 12, 24, 48, 72, 120, 168, 336, 720];
     // Binary lookup: returns null when lookback window starts before REAL_DATA_START_MS
@@ -6350,7 +6475,7 @@ export default function SocialBladeLive() {
 
       // Desync: PT updates immediately, TT lags by desync*actualMs (0..1 = 0..full period).
       // Gap fires at the midpoint (same slot as SB) using 1s-resolution noise.
-      const delayTT = desync * actualMs;
+      const delayTT = desyncEff * actualMs;
       const delaySB = delayTT / 2;
       const delayFTV = delayTT / 2;
       if (delayTT <= 0) {
@@ -6369,7 +6494,7 @@ export default function SocialBladeLive() {
     };
     tickId = setTimeout(tick, getTickMs());
     return () => { clearTimeout(tickId); pendingTimeouts.forEach(clearTimeout); };
-  }, [speedMode, playing, reverse, mult, effectiveMaxIdx, desync, isDyn, appMode, rtInterval]);
+  }, [speedMode, playing, reverse, mult, effectiveMaxIdx, desyncEff, isDyn, appMode, rtInterval]);
 
   // - Clock ticker: advances every wall-clock second by 1 data-second x mult -
   const [clockTime, setClockTime] = useState(curTime);
@@ -6478,21 +6603,12 @@ export default function SocialBladeLive() {
   // effectiveSpeed: absolute sim-sec/real-sec shown next to the Dynamic button.
   // Multiplied by modeBaseSec so 1min/s and 1hr/s modes display the true combined rate.
   const effectiveSpeed = isDyn ? getDynSpeed(dynGapRef.current(pos)) * mult : null;
-  const dur = rtRollDuration(rtInterval, effectiveMult);
+  const dur = rtRollAnimDuration(rtInterval, effectiveMult);
 
   // LAYOUT: SocialBlade counter helper - see LAYOUTS.md
   const renderCounter = (value) => {
     if (isRTMode) return <CasinoCounter value={value} duration={dur} seekToken={seekToken}/>;
-    if (value == null) return "\u2014";
-    const formatted = Math.round(value).toLocaleString();
-    return (
-      <span style={{ display:"inline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 }}>
-        {formatted.split("").map((ch, i) => {
-          if (ch === ",") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>,</span>;
-          return <span key={"d"+i} style={{ display:"inline-block", height:"1em", width:"1ch", textAlign:"center", lineHeight:1, verticalAlign:"top", marginRight:"0.0105em" }}>{ch}</span>;
-        })}
-      </span>
-    );
+    return <CasinoStatic value={value}/>;
   };
 
   // Unified SocialBlade channel card. Renders the sub-count + profile pic +
@@ -6661,10 +6777,10 @@ export default function SocialBladeLive() {
   // lookbacks index 4 = 24 hours), converted to subs/day for the ETA
   // functions. Otherwise they use the raw per-day field from the data.
   // In Real Data mode always use the binary-derived 24h rate (no tablePoint.pd).
-  const predRatePdp = (appMode === 'real' || minuteSnap)
+  const predRatePdp = (appMode === 'real' || minuteSnapEff)
     ? (typeof subsPerMinTable.pdp[4] === 'number' ? Math.round(subsPerMinTable.pdp[4]) * 1440 : null)
     : tablePoint?.pd;
-  const predRateTs = (appMode === 'real' || minuteSnap)
+  const predRateTs = (appMode === 'real' || minuteSnapEff)
     ? (typeof subsPerMinTable.ts[4] === 'number'  ? Math.round(subsPerMinTable.ts[4])  * 1440 : null)
     : tablePoint?.td;
   const pdpNextMs = nextMs(tableDisplayPt);
@@ -7003,7 +7119,7 @@ export default function SocialBladeLive() {
     const tEnd = tMaxCh != null ? Math.min(qTime, tMaxCh) : qTime;
     const tStart = Math.max(tMinCh, tEnd - span * HOUR_MS);
     const shift = Math.round(lbMs / stepMs);
-    const extStart = tStart - stepMs * 2 - lbMs;
+    const extStart = tStart - stepMs * 8 - lbMs;   // hidden points before the left edge
     const extEnd = tEnd + 10000 + stepMs * 2;
     if (useNoise) {
       const nowA = sA(extStart, extEnd, stepMs);
@@ -7111,7 +7227,7 @@ export default function SocialBladeLive() {
 
   // Charts 0,1 (tick-level): update every 10 sim-seconds. Real mode uses rdDashGainData instead.
   const dashGainTick = useMemo(() => {
-    if (appMode === 'real' || !RAW.length || view !== "dashboard" || !dashShowCharts) return [[], [], [], []];
+    if (appMode === 'real' || !RAW.length || view !== "dashboard" || !dashShowCharts) return [[], [], [], [], [], [], []];
     const cfg = {
       tMinCh: RAW[0].t, tMaxCh: null, curTime, rtPeriodSec, useNoise,
       sampleA: null, sampleB: null,
@@ -7121,7 +7237,7 @@ export default function SocialBladeLive() {
       sampleAOrg: null, sampleBOrg: null,
       nrtBothOrg: (t) => { const r = interpAt(t); return r ? { vA: r.opt, vB: r.ott } : null; },
     };
-    return [0, 1, 6, 7, 8].map(ci => _buildGainTick(ci, cfg));
+    return [0, 1, 6, 7, 8, 9, 10].map(ci => _buildGainTick(ci, cfg));
   }, [view, dashShowCharts, Math.floor(curTime / 10000), useNoise, rtPeriodSec, interpAt, effectiveFilterAudits]);
 
   // Charts 2,3 (5min/30min): pre-computed to end of current hour. Real mode uses rdDashGainData instead.
@@ -7162,6 +7278,8 @@ export default function SocialBladeLive() {
     dashGainTick[2],
     dashGainTick[3],   // index 7: per-second (1s gain / 1min)
     dashGainTick[4],   // index 8: 5min gain / 1hr
+    dashGainTick[5],   // index 9: 5s gain / 1min
+    dashGainTick[6],   // index 10: 10s gain / 1min
   ], [dashGainTick, dashGainMinute, dashGainHourly]);
 
   const _altBucketFor = (spanMs) => {
@@ -7209,7 +7327,7 @@ export default function SocialBladeLive() {
     // per-frame x-domain easing keeps the window gliding smoothly.
     const tEnd = bucket.key * bucket.quantum;
     const pts = [];
-    const tFirst = Math.ceil(bucket.tMin / bucket.step) * bucket.step;
+    const tFirst = Math.floor(bucket.tMin / bucket.step) * bucket.step - 8 * bucket.step;   // hidden points before the left edge
     for (let t = tFirst; t < tEnd; t += bucket.step) {
       const v = _altPdpTsAt(t);
       if (v) pts.push({ t, pt: v.pt, tt: v.tt, g: v.pt - v.tt, gap: v.pt - v.tt });
@@ -7222,7 +7340,7 @@ export default function SocialBladeLive() {
   const _altBuildTotalData = (bucket) => {
     const tEnd = bucket.key * bucket.quantum;
     const pts = [];
-    const tFirst = Math.ceil(bucket.tMin / bucket.step) * bucket.step;
+    const tFirst = Math.floor(bucket.tMin / bucket.step) * bucket.step - 8 * bucket.step;   // hidden points before the left edge
     for (let t = tFirst; t < tEnd; t += bucket.step) {
       const v = _altPdpTsAt(t);
       if (v) pts.push({ t, pt: v.pt, tt: v.tt, g: v.pt - v.tt });
@@ -7264,7 +7382,7 @@ export default function SocialBladeLive() {
     // 1min charts: one extra minute before the window (off-screen, clipped by the x-domain),
     // so "1min avg" has its full trailing 60s at the left edge.
     const lead = lbMs === 60000 ? 60000 : 0;
-    const tFirst = Math.ceil((bucket.tMin - lead) / bucket.step) * bucket.step;
+    const tFirst = Math.floor((bucket.tMin - lead) / bucket.step) * bucket.step - 8 * bucket.step;   // hidden points before the left edge
     for (let t = tFirst; t < tEnd; t += bucket.step) {
       const p = pointAt(t);
       if (p) pts.push(p);
@@ -7365,7 +7483,7 @@ export default function SocialBladeLive() {
   // The bucket system stabilises tEnd at a quantized past timestamp so the
   // x-domain window slides smoothly without rebuilding data every frame.
   const rdDashGainData = useMemo(() => {
-    if (view !== 'dashboard' || !dashShowCharts) return [[], [], [], [], [], [], [], [], []];
+    if (view !== 'dashboard' || !dashShowCharts) return [[], [], [], [], [], [], [], [], [], [], []];
     return [
       _altBuildGainData(_altGain10mBucket, 0, MINUTE),
       _altBuildGainData(_altGain1hBucket, 1, MINUTE),
@@ -7376,6 +7494,8 @@ export default function SocialBladeLive() {
       _altBuildGainData(_altGain1hBucket, 6, MINUTE),
       dashPerSecond ? _altBuildGainData(_altPerSecBucket, 7, MINUTE) : [],
       _altBuildGainData(_altGain1hBucket, 8, MINUTE),  // index 8: 5min gain (same 1hr span as ci=1)
+      dashPerSecond ? _altBuildGainData(_altPerSecBucket, 9, MINUTE) : [],   // index 9: 5s gain / 1min
+      dashPerSecond ? _altBuildGainData(_altPerSecBucket, 10, MINUTE) : [],  // index 10: 10s gain / 1min
     ];
   }, [view, dashShowCharts, dashPerSecond,
     _altGain10mBucket.key, _altGain1hBucket.key, _altGain24hBucket.key,
@@ -7443,23 +7563,12 @@ export default function SocialBladeLive() {
   // LAYOUT: Dashboard counter helper - see LAYOUTS.md
   const dashRenderGap = (value) => {
     if (isRTMode) return <CasinoCounter value={value} signed duration={dur} seekToken={seekToken}/>;
-    if (value == null) return "\u2014";
-    const prefix = value >= 0 ? "+" : "-";
-    const formatted = Math.round(Math.abs(value)).toLocaleString();
-    return (
-      <span style={{ display:"inline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 }}>
-        <span style={{ display:"inline-block", height:"1em", lineHeight:1, verticalAlign:"top" }}>{prefix}</span>
-        {formatted.split("").map((ch, i) => {
-          if (ch === ",") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>,</span>;
-          return <span key={"d"+i} style={{ display:"inline-block", height:"1em", width:"1ch", textAlign:"center", lineHeight:1, verticalAlign:"top", marginRight:"0.0105em" }}>{ch}</span>;
-        })}
-      </span>
-    );
+    return <CasinoStatic value={value} signed/>;
   };
   // Sub Gap style: absolute value, no sign - the caller colors it by the leading channel.
   const dashRenderSubGap = (value) => (isRTMode
     ? <CasinoCounter value={value != null ? Math.abs(value) : null} duration={dur} seekToken={seekToken}/>
-    : (value != null ? Math.round(Math.abs(value)).toLocaleString() : "-"));
+    : <CasinoStatic value={value != null ? Math.abs(value) : null} empty="-"/>);
   // Flare variant: absolute value, no sign. Uses the snappier FlareCasinoCounter,
   // whose duration is a fixed constant - deliberately independent of the current
   // playback mode (Fast RT / Slow RT / mult), so the Flare counter always feels
@@ -7468,25 +7577,14 @@ export default function SocialBladeLive() {
   const dashRenderGapAbs = (value) => {
     const abs = value != null ? Math.abs(value) : null;
     if (isRTMode) return <FlareCasinoCounter value={abs} seekToken={seekToken}/>;
-    return abs != null ? Math.round(abs).toLocaleString() : "\u2014";
+    return <CasinoStatic value={abs}/>;
   };
 
   // Dashboard-scoped counter renderer - always the standard CasinoCounter.
   // (FlareCasinoCounter stays reserved for FlareView.)
   // LAYOUT: Dashboard counter helper - see LAYOUTS.md
   const dashRenderCounter = (value) => {
-    if (!isRTMode) {
-      if (value == null) return "\u2014";
-      const formatted = Math.round(value).toLocaleString();
-      return (
-        <span style={{ display:"inline", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap", lineHeight:1, letterSpacing:0 }}>
-          {formatted.split("").map((ch, i) => {
-            if (ch === ",") return <span key={"c"+i} style={{ display:"inline-block", verticalAlign:"top", lineHeight:1, marginRight:"0.0105em" }}>,</span>;
-            return <span key={"d"+i} style={{ display:"inline-block", height:"1em", width:"1ch", textAlign:"center", lineHeight:1, verticalAlign:"top", marginRight:"0.0105em" }}>{ch}</span>;
-          })}
-        </span>
-      );
-    }
+    if (!isRTMode) return <CasinoStatic value={value}/>;
     return <CasinoCounter value={value} duration={dur} seekToken={seekToken}/>;
   };
 
@@ -7546,7 +7644,9 @@ export default function SocialBladeLive() {
         perMin: explorer.kind === "gain" && dashGainPerMin,
         // Charts Show Excess: the Explorer plots the Excess vs OTL series too.
         excess: exChartsOn,
-        title: (exChartsOn ? "Excess " : "") + (explorer.kind === "gain" && dashGainPerMin && explorer.lbSec >= 60 ? explorer.title.replace("Gain", "avg") : explorer.title) }} curTime={curTime} ready={exChartsOn ? excessReady : realDataReady} onClose={closeExplorer} dc={eDC} dev={devMode} chan={dashChanFilter}/>
+        title: (exChartsOn ? "Excess " : "") + (explorer.kind === "gain" && dashGainPerMin && explorer.lbSec >= 60 ? explorer.title.replace("Gain", "avg") : explorer.title) }} curTime={curTime} ready={exChartsOn ? excessReady : realDataReady} onClose={closeExplorer}
+        onSeek={(ts) => { const p = tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, ts))); setPos(p); posRef.current = p; expWasPlayingRef.current = false; dispatch({type:"STOP"}); clearRT(); dispatch({type:"BUMP_SEEK"}); }}
+        dc={eDC} dev={devMode} chan={dashChanFilter}/>
     </DashExpandOverlay>,
     document.body);
 
@@ -7564,11 +7664,29 @@ export default function SocialBladeLive() {
   };
 
   // LAYOUT: Dashboard chart card renderer - see LAYOUTS.md
-  const renderDashGainChart = (ci, h, cfg) => {
+  // Dashboard charts render directly (ChartTween is not used: per-frame re-renders
+  // cost too much). The static anim keeps the renderers' interface.
+  const _tweenChart = (render) => render(curTime, { target: curTime, dom: (id, dom) => dom });
+  const renderDashGainChart = (ci, h, cfg) => _tweenChart((t, anim) => _renderDashGainChartAt(ci, h, cfg, t, anim));
+  const renderDashGapChart = (ci, gapLabel, h, cfg) => _tweenChart((t, anim) => _renderDashGapChartAt(ci, gapLabel, h, cfg, t, anim));
+  const renderDashTotalCharts = (cfg, h=260, wrapStyle=null, which=null) => _tweenChart((t, anim) => _renderDashTotalChartsAt(cfg, h, wrapStyle, which, t, anim));
+  const _renderDashGainChartAt = (ci, h, cfg, curTime, anim) => {
+    const tNew = anim.target;   // newest data time; curTime = sliding axis time
     // 5min toggle: swap ci=1 (10min lookback) to ci=8 (5min lookback) when enabled
     // and data for ci=8 is available (non-empty) in this cfg.
     const has5mData = (cfg.gainData[8]?.length ?? 0) > 0;
-    const effectiveCi = (ci === 1 && dashGain5min && has5mData) ? 8 : ci;
+    // Default layout: the 1min gain chart (ci=6, 1hr window) can switch its lookback to
+    // 5min (ci=8) or 10min (ci=1); the /sec chart (ci=7, 1min window) to 5s (ci=9) or
+    // 10s (ci=10). Each pair shares its chart's window.
+    const lbToggle = (ci === 6 || ci === 7) && dashLayout === 0;
+    const lbSec = ci === 7;
+    const lbMult = dashDefGainLb;
+    const setLbMult = setDashDefGainLb;
+    const lbAltCi = !lbToggle ? null
+      : lbMult === 5 ? (lbSec ? 9 : 8)
+      : lbMult === 10 ? (lbSec ? 10 : 1) : null;
+    const effectiveCi = (lbAltCi != null && (cfg.gainData[lbAltCi]?.length ?? 0) > 0) ? lbAltCi
+      : (ci === 1 && dashGain5min && has5mData) ? 8 : ci;
     const [lb, span] = gainCharts[effectiveCi];
     const lbMs = Math.round(lb * HOUR_MS);
     const lbMins = lb * 60;
@@ -7598,8 +7716,8 @@ export default function SocialBladeLive() {
       : gd_raw;
     // Exact current gain over the lookback, computed at the live display period so
     // the end-dot labels match the actual current value, not the chart's sample.
-    const _gNow = cfg.valAt ? cfg.valAt(curTime) : null;
-    const _gPast = cfg.valAt ? cfg.valAt(curTime - lbMs) : null;
+    const _gNow = cfg.valAt ? cfg.valAt(tNew) : null;
+    const _gPast = cfg.valAt ? cfg.valAt(tNew - lbMs) : null;
     // Filter Audits. auditChans (the {ch,color} pairs) is present on every gain
     // chart when the filter is on; the live end-dot delta is audit-stripped too so
     // the dot matches the audit-free line. The dotted MARKER lines, however, are
@@ -7610,8 +7728,8 @@ export default function SocialBladeLive() {
     if (auditChans) {
       const aA = auditChans[0] && auditChans[0].ch, aB = auditChans[1] && auditChans[1].ch;
       const cumFn = appMode === 'real' ? chartCumAudit : getCumAudit;
-      if (_exGainA != null && aA) _exGainA -= Math.round(cumFn(curTime, aA) - cumFn(curTime - lbMs, aA));
-      if (_exGainB != null && aB) _exGainB -= Math.round(cumFn(curTime, aB) - cumFn(curTime - lbMs, aB));
+      if (_exGainA != null && aA) _exGainA -= Math.round(cumFn(tNew, aA) - cumFn(tNew - lbMs, aA));
+      if (_exGainB != null && aB) _exGainB -= Math.round(cumFn(tNew, aB) - cumFn(tNew - lbMs, aB));
     }
     if (dashGainPerMin && lbMins > 1) {
       _exGainA = _exGainA != null ? _exGainA / lbMins : null;
@@ -7623,7 +7741,7 @@ export default function SocialBladeLive() {
       const cumFn = appMode === 'real' ? chartCumAudit : getCumAudit;
       let sA = 0, sB = 0, n = 0;
       for (let k = 0; k < 60; k++) {
-        const t = curTime - k * 1000, g1 = cfg.valAt(t), g0 = cfg.valAt(t - lbMs);
+        const t = tNew - k * 1000, g1 = cfg.valAt(t), g0 = cfg.valAt(t - lbMs);
         if (!g1 || !g0) continue;
         let gA = g1.a - g0.a, gB = g1.b - g0.b;
         if (aA) gA -= cumFn(t, aA) - cumFn(t - lbMs, aA);
@@ -7635,29 +7753,35 @@ export default function SocialBladeLive() {
     // Left bound: the first second this chart has a value for (the lookback, plus the
     // 60s average in 1min avg mode), or the normal window once that has filled.
     const histMs = lbMs + (avg1m ? 60000 : 0);
-    const tWin = curTime - span * HOUR_MS;
-    const tMin = Math.min(curTime, Math.max(tWin, cfg.dataStart + histMs));
+    // Short windows end a few samples before the newest data (see _hiddenLeadMs).
+    const tAx = curTime - ((isRTMode && span <= 1) ? _hiddenLeadMs(gd, tNew) : 0);
+    // End-dot value: what the line shows at the dot (not the exact live value) when the
+    // axis lags the data, and always on the per-second charts.
+    const lineLabel = tAx < curTime || span < 1/30;
+    const tWin = tAx - span * HOUR_MS;
+    const tMin = Math.min(tAx, Math.max(tWin, cfg.dataStart + histMs));
     // While the window is still filling, run the line up to the live value.
     const gdLive = (tWin < tMin && _exGainA != null && _exGainB != null)
-      ? [...gd.filter(d => d.t < curTime), { t: curTime, [cfg.lineA.key]: _exGainA, [cfg.lineB.key]: _exGainB }]
+      ? [...gd.filter(d => d.t < tNew), { t: tNew, [cfg.lineA.key]: _exGainA, [cfg.lineB.key]: _exGainB }]
       : gd;
-    const insufficient = !!realDataReady && gdLive.filter(d => d.t >= tMin && d.t <= curTime && (d[cfg.lineA.key] != null || d[cfg.lineB.key] != null)).length < 2;
+    const insufficient = !!realDataReady && gdLive.filter(d => d.t >= tMin && d.t <= tNew && (d[cfg.lineA.key] != null || d[cfg.lineB.key] != null)).length < 2;
     const auditLines = (auditChans && lb <= 1)
       ? (appMode === 'real'
-          ? (exChartsOn ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a => a.ms >= tMin && a.ms <= curTime && auditChans.some(m => m.ch === a.channel))
-          : AUDITS.filter(a => a[3] >= tMin && a[3] <= curTime && auditChans.some(m => m.ch === a[1])))
+          ? (exChartsOn ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a => a.ms >= tMin && a.ms <= tAx && auditChans.some(m => m.ch === a.channel))
+          : AUDITS.filter(a => a[3] >= tMin && a[3] <= tAx && auditChans.some(m => m.ch === a[1])))
       : [];
-    const xDom = [tMin, curTime];
+    const xDom = [tMin, tAx];
     const _chanKeys = dashChanFilter==='pdp'?[cfg.lineA.key]:dashChanFilter==='ts'?[cfg.lineB.key]:[cfg.lineA.key,cfg.lineB.key];
-    const dom = dashGetRange(gdLive, _chanKeys, curTime, tMin);
-    const yTicks = niceTicks(dom, true);
-    const edgeBufG = (curTime - tMin) * 0.1;
-    const allMidnightsG = thinMidnights(getMidnights(tMin, curTime), 6);
-    const midnightTicksG = allMidnightsG.filter(m => m - tMin > edgeBufG && curTime - m > edgeBufG);
+    const domT = dashGetRange(gdLive, _chanKeys, tAx, tMin);
+    const dom = anim.dom('g', domT);
+    const yTicks = _ticksIn(niceTicks(domT, true), dom);
+    const edgeBufG = (tAx - tMin) * 0.1;
+    const allMidnightsG = thinMidnights(getMidnights(tMin, tAx), 6);
+    const midnightTicksG = allMidnightsG.filter(m => m - tMin > edgeBufG && tAx - m > edgeBufG);
     const _midStepG = Math.ceil(midnightTicksG.length / 6);
     const _shownMidnightsG = _midStepG > 1 ? midnightTicksG.filter((_,i) => i % _midStepG === 0) : midnightTicksG;
     const midnightSetG = new Set(_shownMidnightsG);
-    const allAxisTicksG = [tMin, curTime, ..._shownMidnightsG];
+    const allAxisTicksG = [tMin, tAx, ..._shownMidnightsG];
     const xFmtBase = span < 1
       ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
       : span <= 24
@@ -7675,6 +7799,9 @@ export default function SocialBladeLive() {
             <button onClick={() => setDashGain5min(true)} style={miniTogBtn(dashGain5min)}>5m</button>
           </React.Fragment>
         )}
+        {lbToggle && [1, 5, 10].map(m => (
+          <button key={m} onClick={() => setLbMult(m)} style={miniTogBtn(lbMult === m)}>{m}{lbSec ? "s" : "m"}</button>
+        ))}
         {(ci === 0 || ci === 6 || ci === 7) && (
           <button onClick={() => setDashPerSecond(v => !v)} title="1s gain over the last minute" style={miniTogBtn(dashPerSecond)}>/sec</button>
         )}
@@ -7696,7 +7823,7 @@ export default function SocialBladeLive() {
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1}/>
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.lineA.key} stroke={cfg.lineA.color} strokeWidth={1.8} dot={false} name={cfg.lineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.lineB.key} stroke={cfg.lineB.color} strokeWidth={1.8} dot={false} name={cfg.lineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
-            {endDots(gdLive, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.lineA.key,color:cfg.lineA.color,exact:_exGainA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.lineB.key,color:cfg.lineB.color,exact:_exGainB}]:[])])}
+            {endDots(gdLive, tAx, [...(dashChanFilter!=='ts'?[{key:cfg.lineA.key,color:cfg.lineA.color,exact:lineLabel?null:_exGainA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.lineB.key,color:cfg.lineB.color,exact:lineLabel?null:_exGainB}]:[])])}
           </LineChart>
         </ResponsiveContainer>
         )}
@@ -7705,31 +7832,35 @@ export default function SocialBladeLive() {
   };
 
   // LAYOUT: Dashboard chart card renderer - see LAYOUTS.md
-  const renderDashGapChart = (ci, gapLabel, h, cfg) => {
+  const _renderDashGapChartAt = (ci, gapLabel, h, cfg, curTime, anim) => {
+    const tNew = anim.target;   // newest data time; curTime = sliding axis time
     const [lb, span] = gainCharts[ci];
     const lbMs = Math.round(lb * HOUR_MS);
     let gd = cfg.gainData[ci];
-    const tMin = Math.max(curTime - span * HOUR_MS, cfg.dataStart);
+    // Short windows end a few samples before the newest data (see _hiddenLeadMs).
+    const tAx = curTime - ((isRTMode && span <= 1) ? _hiddenLeadMs(gd, tNew) : 0);
+    const tMin = Math.max(tAx - span * HOUR_MS, cfg.dataStart);
     // Window still at the very start of the data: pin the line to the first second and
     // the live value, so it draws from second 1 rather than the first sample.
     if (tMin === cfg.dataStart && cfg.valAt) {
-      const v0 = cfg.valAt(tMin), v1 = cfg.valAt(curTime);
+      const v0 = cfg.valAt(tMin), v1 = cfg.valAt(tNew);
       gd = [
         ...(v0 ? [{ t: tMin, gap: v0.a - v0.b }] : []),
-        ...gd.filter(d => d.t > tMin && d.t < curTime),
-        ...(v1 && curTime > tMin ? [{ t: curTime, gap: v1.a - v1.b }] : []),
+        ...gd.filter(d => d.t > tMin && d.t < tNew),
+        ...(v1 && tNew > tMin ? [{ t: tNew, gap: v1.a - v1.b }] : []),
       ];
     }
-    const xDom = [tMin, curTime];
-    const dom = dashGetRange(gd, ["gap"], curTime, tMin);
-    const yTicks = niceTicks(dom, true);
-    const edgeBufGap = (curTime - tMin) * 0.1;
-    const allMidnightsGap = thinMidnights(getMidnights(tMin, curTime), 6);
-    const midnightTicksGap = allMidnightsGap.filter(m => m - tMin > edgeBufGap && curTime - m > edgeBufGap);
+    const xDom = [tMin, tAx];
+    const domT = dashGetRange(gd, ["gap"], tAx, tMin);
+    const dom = anim.dom('gap', domT);
+    const yTicks = _ticksIn(niceTicks(domT, true), dom);
+    const edgeBufGap = (tAx - tMin) * 0.1;
+    const allMidnightsGap = thinMidnights(getMidnights(tMin, tAx), 6);
+    const midnightTicksGap = allMidnightsGap.filter(m => m - tMin > edgeBufGap && tAx - m > edgeBufGap);
     const _midStepGap = Math.ceil(midnightTicksGap.length / 6);
     const _shownMidnightsGap = _midStepGap > 1 ? midnightTicksGap.filter((_,i) => i % _midStepGap === 0) : midnightTicksGap;
     const midnightSetGap = new Set(_shownMidnightsGap);
-    const allAxisTicksGap = [tMin, curTime, ..._shownMidnightsGap];
+    const allAxisTicksGap = [tMin, tAx, ..._shownMidnightsGap];
     const xFmtBaseGap = span <= 1
       ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
       : span <= 24
@@ -7750,7 +7881,7 @@ export default function SocialBladeLive() {
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gd, tMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey="gap" stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.gapName} isAnimationActive={false}/>
-            {endDots(gd, curTime, [{key:'gap',color:'#e2e5eb',exact:cfg.exactGap}])}
+            {endDots(gd, tAx, [{key:'gap',color:'#e2e5eb',exact:tAx < curTime ? null : cfg.exactGap}])}
           </LineChart>
         </ResponsiveContainer>
       </DashChartCard>
@@ -7839,9 +7970,9 @@ export default function SocialBladeLive() {
             </div>
             <div style={{fontSize:14,color:eDC.DIM,marginBottom:4,textAlign:"center"}}>{subsLabel}</div>
             {showRates && <div style={{display:"flex",gap:0}}>
-              <DashRateDisplay label={chanA.rateLabels[0]} value={chanA.rates[0]} color={chanA.color} dc={eDC}/>
-              <DashRateDisplay label={chanA.rateLabels[1]} value={chanA.rates[1]} color={chanA.color} dc={eDC}/>
-              <DashRateDisplay label={chanA.rateLabels[2]} value={chanA.rates[2]} color={chanA.color} dc={eDC}/>
+              <DashRateDisplay label={chanA.rateLabels[0]} value={chanA.rates[0]} color={chanA.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+              <DashRateDisplay label={chanA.rateLabels[1]} value={chanA.rates[1]} color={chanA.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+              <DashRateDisplay label={chanA.rateLabels[2]} value={chanA.rates[2]} color={chanA.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
             </div>}
           </div>
           {/* Gap block */}
@@ -7876,9 +8007,9 @@ export default function SocialBladeLive() {
             </div>
             <div style={{fontSize:14,color:eDC.DIM,marginBottom:4,textAlign:"center"}}>{subsLabel}</div>
             {showRates && <div style={{display:"flex",gap:0}}>
-              <DashRateDisplay label={chanB.rateLabels[0]} value={chanB.rates[0]} color={chanB.color} dc={eDC}/>
-              <DashRateDisplay label={chanB.rateLabels[1]} value={chanB.rates[1]} color={chanB.color} dc={eDC}/>
-              <DashRateDisplay label={chanB.rateLabels[2]} value={chanB.rates[2]} color={chanB.color} dc={eDC}/>
+              <DashRateDisplay label={chanB.rateLabels[0]} value={chanB.rates[0]} color={chanB.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+              <DashRateDisplay label={chanB.rateLabels[1]} value={chanB.rates[1]} color={chanB.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+              <DashRateDisplay label={chanB.rateLabels[2]} value={chanB.rates[2]} color={chanB.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
             </div>}
           </div>
           {milestoneEl}
@@ -7972,7 +8103,7 @@ export default function SocialBladeLive() {
                   {[0,1,2].map(i=>(
                     <div key={i} style={{fontSize:12,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",display:"flex"}}>
                       <span style={{color:eDC.DIM,width:45,flexShrink:0,textAlign:"left"}}>{chanA.rateLabels[i]}:</span>
-                      <span style={{color:chanA.rates[i]!=null?(chanA.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanA.rates[i]!=null?(chanA.rates[i]>=0?"+":"")+Math.round(chanA.rates[i]).toLocaleString():"--"}</span>
+                      <span style={{color:chanA.rates[i]!=null?(chanA.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanA.rates[i]==null?"--":isRTMode?<CasinoCounter value={chanA.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={chanA.rates[i]} signed/>}</span>
                     </div>
                   ))}
                 </div>}
@@ -7997,7 +8128,7 @@ export default function SocialBladeLive() {
                   {[0,1,2].map(i=>(
                     <div key={i} style={{fontSize:12,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",display:"flex"}}>
                       <span style={{color:eDC.DIM,width:45,flexShrink:0,textAlign:"left"}}>{chanB.rateLabels[i]}:</span>
-                      <span style={{color:chanB.rates[i]!=null?(chanB.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanB.rates[i]!=null?(chanB.rates[i]>=0?"+":"")+Math.round(chanB.rates[i]).toLocaleString():"--"}</span>
+                      <span style={{color:chanB.rates[i]!=null?(chanB.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanB.rates[i]==null?"--":isRTMode?<CasinoCounter value={chanB.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={chanB.rates[i]} signed/>}</span>
                     </div>
                   ))}
                 </div>}
@@ -8099,9 +8230,9 @@ export default function SocialBladeLive() {
     const fs1 = big ? 14 : 10, lbl = big ? 11 : 9;
     const pct = (v) => isRTMode
       ? <><CasinoCounter value={Math.round(v / tot * 10000)} decimals={2} duration={dur} seekToken={seekToken}/>%</>
-      : (v / tot * 100).toFixed(2) + "%";
+      : <><CasinoStatic value={Math.round(v / tot * 10000)} decimals={2}/>%</>;
     const val = (v) => v != null && v !== 0
-      ? (isRTMode ? <CasinoCounter value={v} signed duration={dur} seekToken={seekToken}/> : (v > 0 ? "+" : "") + v.toLocaleString())
+      ? (isRTMode ? <CasinoCounter value={v} signed duration={dur} seekToken={seekToken}/> : <CasinoStatic value={v} signed/>)
       : "--";
     const both = pdpEx > 0 && tsEx > 0, tot = both ? pdpEx + tsEx : 0;
     return (
@@ -8121,19 +8252,23 @@ export default function SocialBladeLive() {
 
 
   // LAYOUT: Dashboard chart card renderer - see LAYOUTS.md
-  const renderDashTotalCharts = (cfg, h=260, wrapStyle=null, which=null) => {
+  const _renderDashTotalChartsAt = (cfg, h, wrapStyle, which, curTime, anim) => {
     const totTMin = Math.max(curTime - dashWin * DAY_MS, cfg.dataStart);
     const _totKeys = dashChanFilter==='pdp'?[cfg.totalLineA.key]:dashChanFilter==='ts'?[cfg.totalLineB.key]:[cfg.totalLineA.key,cfg.totalLineB.key];
-    const totDom = dashGetRange(cfg.totalData, _totKeys, curTime, totTMin);
-    const totTicks = niceTicks(totDom);
-    const gapDom = dashGetRange(cfg.totalData, [cfg.totalGapKey], curTime, totTMin);
-    const gapTicks = niceTicks(gapDom);
+    const totalData = cfg.totalData;
+    const totDomT = dashGetRange(totalData, _totKeys, curTime, totTMin);
+    const totDom = anim.dom('tot', totDomT);
+    const totTicks = _ticksIn(niceTicks(totDomT), totDom);
+    const gapDomT = dashGetRange(totalData, [cfg.totalGapKey], curTime, totTMin);
+    const gapDom = anim.dom('totGap', gapDomT);
+    const gapTicks = _ticksIn(niceTicks(gapDomT), gapDom);
+
     const totXDom = [totTMin, curTime];
     const gapXDom = [totTMin, curTime];
     const subsCard = (
       <DashChartCard title={cfg.totalTitle} dc={eDC} onExpand={openExplorer({ kind: "subs", title: "Total Subscribers", t0: totTMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
-          <LineChart data={cfg.totalData} margin={{top:4,right:70,bottom:0,left:0}}>
+          <LineChart data={totalData} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
             <XAxis dataKey="t" type="number" domain={totXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
@@ -8141,7 +8276,7 @@ export default function SocialBladeLive() {
             {!isRTMode && <Tooltip content={<DashTooltip fmtMode={cfg.totalFmt||"subs"} dc={eDC} {...dashAuditTip(cfg.totalData, totTMin)}/>}/>}
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.totalLineA.key} stroke={cfg.totalLineA.color} strokeWidth={2} dot={false} name={cfg.totalLineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.totalLineB.key} stroke={cfg.totalLineB.color} strokeWidth={2} dot={false} name={cfg.totalLineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
-            {endDots(cfg.totalData, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.totalLineA.key,color:cfg.totalLineA.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.totalLineB.key,color:cfg.totalLineB.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactB}]:[])])}
+            {endDots(totalData, curTime, [...(dashChanFilter!=='ts'?[{key:cfg.totalLineA.key,color:cfg.totalLineA.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactA}]:[]),...(dashChanFilter!=='pdp'?[{key:cfg.totalLineB.key,color:cfg.totalLineB.color,fmtMode:cfg.totalFmt||'subs',exact:cfg.exactB}]:[])])}
           </LineChart>
         </ResponsiveContainer>
       </DashChartCard>
@@ -8149,7 +8284,7 @@ export default function SocialBladeLive() {
     const gapCard = (
       <DashChartCard title={cfg.gapTitle} dc={eDC} onExpand={openExplorer({ kind: "gap", title: "Subscriber Gap", t0: totTMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
-          <LineChart data={cfg.totalData} margin={{top:4,right:70,bottom:0,left:0}}>
+          <LineChart data={totalData} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
             <XAxis dataKey="t" type="number" domain={gapXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
@@ -8157,7 +8292,7 @@ export default function SocialBladeLive() {
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(cfg.totalData, totTMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey={cfg.totalGapKey} stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.totalGapName} isAnimationActive={false}/>
-            {endDots(cfg.totalData, curTime, [{key:cfg.totalGapKey,color:'#e2e5eb',exact:cfg.exactGap}])}
+            {endDots(totalData, curTime, [{key:cfg.totalGapKey,color:'#e2e5eb',exact:cfg.exactGap}])}
           </LineChart>
         </ResponsiveContainer>
       </DashChartCard>
@@ -8257,7 +8392,7 @@ export default function SocialBladeLive() {
           </div>
 
           {/* PHASE (RT modes only) */}
-          {isRTSpeedMode(speedMode) && <>
+          {isRTSpeedMode(speedMode) && view !== "dashboard" && <>
             <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
             <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}} title="Phase-shift PT/TT counter updates; SB lands at midpoint">
               <span style={{fontSize:12,color:"#888",letterSpacing:"0.04em"}}>Counters Desync Shift</span>
@@ -8315,8 +8450,8 @@ export default function SocialBladeLive() {
           {/* DATA: cycles Real Data -> Alt Scenario -> 100M (kept in the URL; swaps the datasets in place) */}
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
             <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DATA</span>
-            <button onClick={()=>{ const m = _DATA_MODE_NEXT[_altSwitchTarget ?? DATA_MODE]; window.history.pushState(null, '', _modePath(m)); setAltSwitching(true); _setDataMode(m); }}
-              title={DATA_100M ? "100M: just Aug 18 00:00 - Aug 30 00:00 EDT, separate from the other data. Click for Real Data" : ALT_SCEN ? `Alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT. Click for ${_DATA_MODE_LABEL[_DATA_MODE_NEXT.alt]}` : "Real data. Click for the alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT"}
+            <button onClick={(e)=>{ const m = _dataModeTarget(_altSwitchTarget ?? DATA_MODE, e.shiftKey); window.history.pushState(null, '', _modePath(m)); setAltSwitching(true); _setDataMode(m); }}
+              title={DATA_100M ? "100M: just Aug 18 00:00 - Aug 30 00:00 EDT, separate from the other data. Click for Real Data" : ALT_SCEN ? `Alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT. Click for Real Data` : "Real data. Click for the alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT"}
               style={{ background:DATA_100M?"#2f2510":ALT_SCEN?"#2a1a35":"transparent", color:DATA_100M?"#e3b85c":ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(DATA_100M?"#5c4a1e":ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN||DATA_100M?600:400, opacity:altSwitching?0.6:1 }}>{altSwitching ? "Switching…" : _DATA_MODE_LABEL[DATA_MODE]}</button>
           </div>
 
@@ -8520,7 +8655,7 @@ export default function SocialBladeLive() {
         <div style={{ position:"absolute", left:0, top:252, width:541, height:231, overflow:"hidden", background:`linear-gradient(to bottom, ${SB_CHART_BG} calc(100% - 80px), ${SB_AXIS_BG} calc(100% - 80px))` }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={pdp1hData} margin={{top:5,right:10,bottom:20,left:10}}>
-              <XAxis dataKey="t" type="number" domain={[tMinPdp1h, pdpTime]} allowDataOverflow ticks={ticksPdp1h} tickFormatter={fmtSbTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
+              <XAxis dataKey="t" type="number" domain={sXPdp1h} allowDataOverflow ticks={ticksPdp1h} tickFormatter={fmtSbTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
               <YAxis hide domain={[sDomPdp1h[0]-(sDomPdp1h[1]-sDomPdp1h[0])*0.22, sDomPdp1h[1]]} allowDataOverflow/>
               <Line type="monotone" dataKey="pt" stroke={salmon} dot={false} strokeWidth={3} isAnimationActive={false}/>
             </LineChart>
@@ -8531,7 +8666,7 @@ export default function SocialBladeLive() {
         <div style={{ position:"absolute", left:_sbColR, top:256, width:561, height:231, overflow:"hidden", background:`linear-gradient(to bottom, ${SB_CHART_BG} calc(100% - 80px), ${SB_AXIS_BG} calc(100% - 80px))` }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={ts1hData} margin={{top:5,right:10,bottom:20,left:10}}>
-              <XAxis dataKey="t" type="number" domain={[tMinTs1h, tsTime]} allowDataOverflow ticks={ticksTs1h} tickFormatter={fmtSbTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
+              <XAxis dataKey="t" type="number" domain={sXTs1h} allowDataOverflow ticks={ticksTs1h} tickFormatter={fmtSbTick} stroke={sbDark?"#666":"#aaa"} tick={{fontSize:12,fontFamily:"Lucida Sans Unicode",fill:sbDark?"#999":"#555"}} axisLine={{stroke:sbDark?"#555":"#aaa"}} tickLine={{stroke:sbDark?"#666":"#aaa",strokeWidth:1}}/>
               <YAxis hide domain={[sDomTs1h[0]-(sDomTs1h[1]-sDomTs1h[0])*0.22, sDomTs1h[1]]} allowDataOverflow/>
               <Line type="monotone" dataKey="tt" stroke={salmon} dot={false} strokeWidth={3} isAnimationActive={false}/>
             </LineChart>
@@ -8762,17 +8897,17 @@ export default function SocialBladeLive() {
           orange: "#c24928",
           gray: "#373737",
           blocks: DATA_100M ? [
-            { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:41,  pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xMin:tMinTs1h,   xMax:tsTime  },
-            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:262, pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xMin:tMinMusic1h, xMax:curTime },
-            { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:490, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xMin:tMinPdp1h,  xMax:pdpTime },
+            { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:41,  pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xDom:sXTs1h },
+            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:262, pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xDom:sXMusic1h },
+            { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:490, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xDom:sXPdp1h },
           ] : showTsOverMode ? [
-            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:41, pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xMin:tMinMusic1h, xMax:curTime },
-            { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:262, pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xMin:tMinTs1h,   xMax:tsTime  },
-            { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:490, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xMin:tMinPdp1h,  xMax:pdpTime },
+            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:41, pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xDom:sXMusic1h },
+            { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:262, pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xDom:sXTs1h },
+            { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:490, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xDom:sXPdp1h },
           ] : [
-            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:41,  pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xMin:tMinMusic1h, xMax:curTime },
-            { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:262, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xMin:tMinPdp1h,  xMax:pdpTime },
-            { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:490, pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xMin:tMinTs1h,   xMax:tsTime  },
+            { label:"MUSIC",     labelPx:20, badgeLeft:53, badgeTop:41,  pfpSrc:musicIcon, value:displayMusic, data1h:music1hData, dataKey:"mt", domY:sDomMusic1h, xDom:sXMusic1h },
+            { label:"PEWDIEPIE", labelPx:19, badgeLeft:53, badgeTop:262, pfpSrc:pdpIcon,   value:displayPt,    data1h:pdp1hData,  dataKey:"pt", domY:sDomPdp1h,   xDom:sXPdp1h },
+            { label:"T-SERIES",  labelPx:20, badgeLeft:53, badgeTop:490, pfpSrc:tsIcon,    value:displayTt,    data1h:ts1hData,   dataKey:"tt", domY:sDomTs1h,    xDom:sXTs1h },
           ],
           tblLeft: 943, tblTop: 185,
           tblHdrH: 38, tblRowH: 24,
@@ -8817,7 +8952,7 @@ export default function SocialBladeLive() {
                   <div style={{ position:"absolute", left:blk.badgeLeft + V2.chartOffX, top:blk.badgeTop + V2.chartOffY, width:V2.chartW, height:V2.chartH, zIndex:2 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={blk.data1h} margin={{top:1,right:1,bottom:1,left:1}}>
-                        <XAxis dataKey="t" type="number" domain={[blk.xMin, blk.xMax]} allowDataOverflow hide/>
+                        <XAxis dataKey="t" type="number" domain={blk.xDom} allowDataOverflow hide/>
                         <YAxis hide domain={blk.domY} allowDataOverflow/>
                         <Line type="monotone" dataKey={blk.dataKey} stroke={salmon} dot={false} strokeWidth={1} isAnimationActive={false}/>
                       </LineChart>
@@ -8955,7 +9090,7 @@ export default function SocialBladeLive() {
                 gap = displayMusic != null && displayPt != null ? displayMusic - displayPt : null;
               }
               if (chaserRate == null || targetRate == null || gap == null) return "";
-              if (minuteSnap) { chaserRate = Math.round(chaserRate); targetRate = Math.round(targetRate); }
+              if (minuteSnapEff) { chaserRate = Math.round(chaserRate); targetRate = Math.round(targetRate); }
               if (chaserRate <= targetRate || gap <= 0) return "";
               return fmtPredDate(curTime + (gap / (chaserRate - targetRate)) * 60000);
             };
@@ -9175,9 +9310,9 @@ export default function SocialBladeLive() {
                 </div>
                 <div style={{ fontSize:16, color:eDC.DIM, marginTop:0 }}>Subscribers</div>
                 {!flareHides("rateDisplays") && <div style={{ display:"flex", gap:0, marginTop:6 }}>
-                  <DashRateDisplay label="1 Min" value={subsPerMinTable.pdp[0]!=null?Math.round(subsPerMinTable.pdp[0]):null} color={eDC.PDP} dc={eDC}/>
-                  <DashRateDisplay label="1 Hour" value={subsPerMinTable.pdp[2]!=null?Math.round(subsPerMinTable.pdp[2]*60):null} color={eDC.PDP} dc={eDC}/>
-                  <DashRateDisplay label="1 Day" value={subsPerMinTable.pdp[4]!=null?Math.round(subsPerMinTable.pdp[4]*1440):null} color={eDC.PDP} dc={eDC}/>
+                  <DashRateDisplay label="1 Min" value={subsPerMinTable.pdp[0]!=null?Math.round(subsPerMinTable.pdp[0]):null} color={eDC.PDP} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+                  <DashRateDisplay label="1 Hour" value={subsPerMinTable.pdp[2]!=null?Math.round(subsPerMinTable.pdp[2]*60):null} color={eDC.PDP} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+                  <DashRateDisplay label="1 Day" value={subsPerMinTable.pdp[4]!=null?Math.round(subsPerMinTable.pdp[4]*1440):null} color={eDC.PDP} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
                 </div>}
               </div>
               <div style={{ textAlign:"center", padding:"0 32px", minWidth:280, alignSelf:"center" }}>
@@ -9199,9 +9334,9 @@ export default function SocialBladeLive() {
                 </div>
                 <div style={{ fontSize:16, color:eDC.DIM, marginTop:0 }}>Subscribers</div>
                 {!flareHides("rateDisplays") && <div style={{ display:"flex", gap:0, marginTop:6 }}>
-                  <DashRateDisplay label="1 Min" value={subsPerMinTable.ts[0]!=null?Math.round(subsPerMinTable.ts[0]):null} color={eDC.TS} dc={eDC}/>
-                  <DashRateDisplay label="1 Hour" value={subsPerMinTable.ts[2]!=null?Math.round(subsPerMinTable.ts[2]*60):null} color={eDC.TS} dc={eDC}/>
-                  <DashRateDisplay label="1 Day" value={subsPerMinTable.ts[4]!=null?Math.round(subsPerMinTable.ts[4]*1440):null} color={eDC.TS} dc={eDC}/>
+                  <DashRateDisplay label="1 Min" value={subsPerMinTable.ts[0]!=null?Math.round(subsPerMinTable.ts[0]):null} color={eDC.TS} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+                  <DashRateDisplay label="1 Hour" value={subsPerMinTable.ts[2]!=null?Math.round(subsPerMinTable.ts[2]*60):null} color={eDC.TS} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
+                  <DashRateDisplay label="1 Day" value={subsPerMinTable.ts[4]!=null?Math.round(subsPerMinTable.ts[4]*1440):null} color={eDC.TS} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
                 </div>}
               </div>
             </div>
