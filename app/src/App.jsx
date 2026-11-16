@@ -1892,6 +1892,14 @@ const MULT_MAX = 1000;
 // tick interval) AND the odometer roll duration must be identical, or the roll
 // can't keep up with the ticks. periodSec is the update interval in sim-seconds at
 // every speed, so the loop fires every periodSec/em real seconds (10ms floor).
+// Pausable animation clock: performance.now() that freezes while RT playback is paused,
+// so tick-driven animations (odometer rolls, chart tweens) stop mid-way and resume.
+let _animPausedAt = null, _animOffset = 0;
+const animNow = () => (_animPausedAt ?? performance.now()) - _animOffset;
+const setAnimPaused = (paused) => {
+  if (paused && _animPausedAt == null) _animPausedAt = performance.now();
+  else if (!paused && _animPausedAt != null) { _animOffset += performance.now() - _animPausedAt; _animPausedAt = null; }
+};
 const rtRollDuration = (periodSec, em) => {
   const m = em > 0 ? em : 1;
   return Math.max(10, periodSec * 1000 / m);
@@ -1916,14 +1924,14 @@ const ChartTween = ({ target, active, durMs, resetKey, render }) => {
   if (target !== st.target || resetKey !== st.key) {
     const snap = !active || st.key !== resetKey || Math.abs(target - st.target) > SMOOTH_MAX_JUMP_MS;
     st.tPrev = st.target; st.target = target; st.key = resetKey;
-    st.t0 = snap ? 0 : performance.now();
+    st.t0 = snap ? 0 : animNow();
     for (const m of Object.values(st.mem)) m.domFrom = snap ? null : m.domShown;
   }
-  const k = (active && st.t0) ? _easeOutCubic(Math.min(1, (performance.now() - st.t0) / durMs)) : 1;
+  const k = (active && st.t0) ? _easeOutCubic(Math.min(1, (animNow() - st.t0) / durMs)) : 1;
   useEffect(() => {
     if (!(active && st.t0)) return;
     let id;
-    const loop = () => { bump(x => x + 1); if (performance.now() - st.t0 < durMs) id = requestAnimationFrame(loop); };
+    const loop = () => { bump(x => x + 1); if (animNow() - st.t0 < durMs) id = requestAnimationFrame(loop); };
     id = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(id);
   }, [target, active, resetKey, durMs]);
@@ -2660,10 +2668,10 @@ const OdometerDigit = ({ fromDigit, totalSteps, duration, animKey }) => {
     el.style.transform = 'translateY(0)';
     if (totalSteps === 0) return;
 
-    const start = performance.now();
+    const start = animNow();
     let raf;
-    const tick = (now) => {
-      const t = Math.min(1, (now - start) / duration);
+    const tick = () => {
+      const t = Math.min(1, (animNow() - start) / duration);
       const e = cssEase(t);
       const rolled = totalSteps * e;
       const step = Math.floor(rolled);
@@ -2949,9 +2957,9 @@ const FlareCasinoCounter = ({ value, signed, seekToken = 0, mult = 1, compact = 
     const from = Math.round(dispRef.current), to = num;
     if (from === to) return;
     dispRef.current = to;
-    const startTime = performance.now();
-    const tick = (now) => {
-      const t = Math.min(1, (now - startTime) / rollMs);
+    const startTime = animNow();
+    const tick = () => {
+      const t = Math.min(1, (animNow() - startTime) / rollMs);
       const e = 1 - Math.pow(1 - t, 3);
       const v = from + (to - from) * e;
       dispRef.current = v;
@@ -4227,10 +4235,10 @@ function useSmoothBounds(target, duration = 500, enabled = true) {
     }
     fromRef.current = curRef.current ? [curRef.current[0], curRef.current[1]] : [tLo, tHi];
     toRef.current = [tLo, tHi];
-    startRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    startRef.current = animNow();
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    const tick = (now) => {
-      const t = Math.min(1, (now - startRef.current) / duration);
+    const tick = () => {
+      const t = Math.min(1, (animNow() - startRef.current) / duration);
       const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
       const v0 = fromRef.current[0] + (toRef.current[0] - fromRef.current[0]) * e;
       const v1 = fromRef.current[1] + (toRef.current[1] - fromRef.current[1]) * e;
@@ -4693,12 +4701,16 @@ const _auditRows = (list, d) => [
 
 // Interactive whole-dataset chart: wheel zooms around the cursor, drag pans, double-click resets.
 const EXP_AUDIT_MARK_MAX_MS = 7 * 24 * 3600000;
-const ChartExplorer = ({ spec, curTime, ready, onClose, onSeek, dc, dev, chan }) => {
+const ChartExplorer = ({ spec, curTime, ready, onClose, onSeek, dc, dev, chan, charts, chartKey, onPickChart }) => {
   const d = dc || DC;
   const wrapRef = useRef(null), canvasRef = useRef(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [view, setView] = useState(() => _expShift(spec.t0, spec.t1 - spec.t0));
-  const [pyr, setPyr] = useState(null);
+  // Pyramid is tagged with the spec it was built for: after a chart switch the old one
+  // (possibly a different series count) is ignored until the new one is ready.
+  const [pyrState, setPyr] = useState(null);
+  const pyrKey = [spec.kind, spec.lbSec || 0, spec.strip, spec.perMin, !!spec.excess].join("|");
+  const pyr = pyrState && pyrState.key === pyrKey ? pyrState.p : null;
   const [hover, setHover] = useState(null);
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef(null);
@@ -4725,7 +4737,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, onSeek, dc, dev, chan })
     if (!ready) return;
     setPyr(null);
     const id = setTimeout(() => {
-      setPyr(_expPyramid(spec.kind, lbSec, spec.strip, spec.perMin, !!spec.excess));
+      setPyr({ key: pyrKey, p: _expPyramid(spec.kind, lbSec, spec.strip, spec.perMin, !!spec.excess) });
       pyrBuiltRef.current = true;
     }, pyrBuiltRef.current ? 30 : EXPAND_MS + 40);
     return () => clearTimeout(id);
@@ -5007,7 +5019,12 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, onSeek, dc, dev, chan })
   return (
     <div style={{ background: d.CARD, border: "1px solid " + d.BORDER, borderRadius: 12, flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px 8px 16px", flexWrap: "wrap" }}>
-        <span style={{ color: d.TEXT, fontWeight: 700, fontSize: 17 }}>{spec.title}</span>
+        {charts && onPickChart
+          ? <select value={chartKey} onChange={e => { onPickChart(e.target.value); e.target.blur(); }}
+              style={{ background: d.CARD, color: d.TEXT, fontWeight: 700, fontSize: 17, fontFamily: "inherit", border: "1px solid " + d.BORDER, borderRadius: 6, padding: "2px 6px", cursor: "pointer", outline: "none" }}>
+              {charts.map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+            </select>
+          : <span style={{ color: d.TEXT, fontWeight: 700, fontSize: 17 }}>{spec.title}</span>}
         {lines.map((l) => (
           <span key={l.name} style={{ color: d.DIM, fontSize: 12 }}>
             <span style={{ display: "inline-block", width: 12, height: 3, background: l.color, borderRadius: 2, marginRight: 6, verticalAlign: "middle" }}/>{l.name}
@@ -5210,6 +5227,15 @@ const GAIN_CHARTS = [
   [5/3600, 1/60, "5s Gain / 1min",   -0.5], // index 9: per-second mode, 5s lookback (Default layout toggle)
   [10/3600, 1/60, "10s Gain / 1min", -0.5], // index 10: per-second mode, 10s lookback (Default layout toggle)
 ];
+
+// Chart Explorer chart picker: every chart the Explorer can show.
+const _expGainTitle = (lbSec) => (lbSec < 60 ? lbSec + "s" : lbSec < 3600 ? (lbSec / 60) + "min" : (lbSec / 3600) + "hr") + " Gain";
+const EXP_CHARTS = [
+  { kind: "subs", title: "Total Subscribers" },
+  { kind: "gap", title: "Subscriber Gap" },
+  ...[1, 5, 10, 60, 300, 600, 3600, 43200, 86400, 172800].map(lbSec => ({ kind: "gain", lbSec, title: _expGainTitle(lbSec) })),
+];
+const _expChartKey = (c) => c.kind === "gain" ? "gain" + c.lbSec : c.kind;
 
 
 // - FOOBAR2000-STYLE SPECTRUM ANALYZER -
@@ -5559,7 +5585,6 @@ export default function SocialBladeLive() {
   const [dashGainPerMin, setDashGainPerMin] = useState(false);
   const [tickerNudge, setTickerNudge] = useState({ n: 0, dir: 0 });
   const [explorer, setExplorer] = useState(null); // { kind, lbSec, title, t0, t1, strip, rect, closing }
-  const expWasPlayingRef = useRef(false);
   const [rawAltReady, setRawAltReady] = useState(false);
   const maxIdx = RAW.length - 1;
   const rdMaxIdx = REAL_DATA_HOURS; // 4704 hours - real data playhead ceiling
@@ -5579,6 +5604,8 @@ export default function SocialBladeLive() {
   // conditions, and display logic all see the effective mode.
   const isDyn = dyn;
   const isRTMode = isRTSpeedMode(speedMode);
+  // Set during render so children's animation effects already see the frozen/resumed clock.
+  setAnimPaused(isRTMode && !playing);
 
   // Position -> |gap| function for Dynamic mode. Reads the PDP-vs-TS gap.
   // Stashed in a ref so the rAF loop and the keyboard arrow handler can
@@ -5730,7 +5757,7 @@ export default function SocialBladeLive() {
   const [artist, setArtist] = useState("");
   const [song, setSong] = useState("");
   const [histStartIdx, setHistStartIdx] = useState(() => _ss.histStartIdx ?? HIST_START);
-  const [rtInterval, setRtInterval] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.rtInterval ?? 2) : 2); // STARTUP: always 2s. RT update interval in seconds (1, 2, or 3)
+  const [rtInterval, setRtInterval] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.rtInterval ?? 2) : 2); // STARTUP: always 2s. RT update interval in seconds (1-5)
   const posRef = useRef(_keptPos ?? initNowPos);
   const effectiveMultRef = useRef(mult);
 
@@ -6421,15 +6448,25 @@ export default function SocialBladeLive() {
   }, [playing, speedMode, isDyn, reverse, mult, effectiveMaxIdx]);
 
   // - RT mode interval -
+  // Pausing mid-tick is continuous: the playhead moves to the exact pause moment and the
+  // tick phase + pending staggered updates are carried over, so resuming picks up where
+  // it left off instead of re-seeding / restarting the tick.
+  const rtCarryRef = useRef(null);
   useEffect(() => {
-    if (!isRTSpeedMode(speedMode) || !playing) return;
+    if (!isRTSpeedMode(speedMode)) { rtCarryRef.current = null; return; }
+    if (!playing) return;
     // One tick per rtInterval sim-seconds at any speed; each tick advances by real
     // elapsed time x mult, so the overall sim-rate stays equal to mult.
     const getTickMs = () => rtRollDuration(rtInterval, effectiveMultRef.current);
     const gauss = () => Math.sqrt(-2*Math.log(Math.random()+1e-10))*Math.cos(2*Math.PI*Math.random());
 
+    // Resume only if nothing moved the playhead (seek / Now / mode switch) while paused.
+    const carry = rtCarryRef.current;
+    rtCarryRef.current = null;
+    const resume = carry && carry.pos === posRef.current && carry.reverse === reverse && rtDisplay.pt != null;
+
     // Seed display at effect setup from binary.
-    {
+    if (!resume) {
       const rdSeed = realDataAt(curTime);
       if (rdSeed) {
         setRtDisplay({ pt: rdSeed.pdp, tt: rdSeed.ts, sb: null, ftv: null,
@@ -6438,8 +6475,13 @@ export default function SocialBladeLive() {
       }
     }
 
-    const pendingTimeouts = [];
-    let tickId;
+    const pending = [];
+    const schedule = (fn, delay) => {
+      const p = { fn, due: performance.now() + delay, done: false };
+      p.id = setTimeout(() => { p.done = true; fn(); }, delay);
+      pending.push(p);
+    };
+    let tickId, ended = false, expectedPos = posRef.current;
     let lastTick = performance.now();
     const tick = () => {
       const actualMs = getTickMs();
@@ -6452,9 +6494,10 @@ export default function SocialBladeLive() {
       const advanceSec = realMs / 1000 * effectiveMultRef.current;
       const advance = (reverse?-1:1)*advanceSec/3600;
       const next = posRef.current + advance;
-      if (!reverse && next>=effectiveMaxIdx) { posRef.current=effectiveMaxIdx; setPos(effectiveMaxIdx); dispatch({type:"STOP"}); return; }
-      if (reverse && next<SEEK_START) { posRef.current=SEEK_START; setPos(SEEK_START); dispatch({type:"STOP"}); return; }
-      posRef.current = next; setPos(next);
+      if (!reverse && next>=effectiveMaxIdx) { ended = true; posRef.current=effectiveMaxIdx; setPos(effectiveMaxIdx); dispatch({type:"STOP"}); return; }
+      if (reverse && next<SEEK_START) { ended = true; posRef.current=SEEK_START; setPos(SEEK_START); dispatch({type:"STOP"}); return; }
+      posRef.current = next; setPos(next); expectedPos = next;
+      for (let i = pending.length - 1; i >= 0; i--) if (pending[i].done) pending.splice(i, 1);
 
       const tNow = REAL_DATA_START_MS + next * HOUR_MS;
       const sbNow  = channelNoisyValueAt('sb_real',  1, tNow) ?? dailyInterp(SBD_REAL, tNow);
@@ -6484,16 +6527,32 @@ export default function SocialBladeLive() {
         setRtDisplay(prev => ({ ...prev, pt:ptVal, ptT:tNow, gapT: prev.ptT ?? tNow }));
         // Midpoint slot (same as gap/SB counter): the whole subs/min + prediction
         // + audit table commits here, so its columns update together, not staggered.
-        const t1 = setTimeout(() => setRtDisplay(prev => ({ ...prev, sb:sbVal, sbT:tNow, music:musicVal, gap:gapVal, midT:tNow })), delaySB);
-        const tF = setTimeout(() => setRtDisplay(prev => ({ ...prev, ftv:ftvVal, ftvT:tNow })), delayFTV);
-        const t2 = setTimeout(() => setRtDisplay(prev => ({ ...prev, tt:ttVal, ttT:tNow })), delayTT);
-        pendingTimeouts.push(t1, tF, t2);
+        schedule(() => setRtDisplay(prev => ({ ...prev, sb:sbVal, sbT:tNow, music:musicVal, gap:gapVal, midT:tNow })), delaySB);
+        schedule(() => setRtDisplay(prev => ({ ...prev, ftv:ftvVal, ftvT:tNow })), delayFTV);
+        schedule(() => setRtDisplay(prev => ({ ...prev, tt:ttVal, ttT:tNow })), delayTT);
       }
 
       tickId = setTimeout(tick, actualMs);
     };
-    tickId = setTimeout(tick, getTickMs());
-    return () => { clearTimeout(tickId); pendingTimeouts.forEach(clearTimeout); };
+    if (resume) {
+      carry.pending.forEach(p => schedule(p.fn, p.remaining));
+      tickId = setTimeout(tick, Math.max(0, getTickMs() - carry.elapsedMs));
+    } else {
+      tickId = setTimeout(tick, getTickMs());
+    }
+    return () => {
+      clearTimeout(tickId);
+      pending.forEach(p => clearTimeout(p.id));
+      // Seeked / ran off the end: nothing to carry.
+      if (ended || posRef.current !== expectedPos) return;
+      const now = performance.now();
+      const elapsedMs = Math.max(0, now - lastTick);
+      const p = Math.max(SEEK_START, Math.min(effectiveMaxIdx,
+        posRef.current + (reverse ? -1 : 1) * elapsedMs / 1000 * effectiveMultRef.current / 3600));
+      posRef.current = p; setPos(p);
+      rtCarryRef.current = { pos: p, reverse, elapsedMs,
+        pending: pending.filter(q => !q.done).map(q => ({ fn: q.fn, remaining: Math.max(0, q.due - now) })) };
+    };
   }, [speedMode, playing, reverse, mult, effectiveMaxIdx, desyncEff, isDyn, appMode, rtInterval]);
 
   // - Clock ticker: advances every wall-clock second by 1 data-second x mult -
@@ -6846,8 +6905,7 @@ export default function SocialBladeLive() {
     // Highcharts labels a tick by the largest unit it lands on: year, month, day, minute, else second.
     if (h === 0 && m === 0 && s === 0) {
       const mon = d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short"});
-      if (d.getUTCDate() !== 1) return d.getUTCDate()+". "+mon;
-      return d.getUTCMonth() === 0 ? String(d.getUTCFullYear()) : mon+" '"+String(d.getUTCFullYear()).slice(2);
+      return d.getUTCDate()+". "+mon;
     }
     const hm = String(h).padStart(2,"0") + ":" + String(m).padStart(2,"0");
     return s ? hm + ":" + String(s).padStart(2,"0") : hm;
@@ -7616,27 +7674,29 @@ export default function SocialBladeLive() {
   //   skXGapTot   - smooth key for gap   x-domain
   //   skDGapTot   - smooth key for gap   y-domain
 
-  // - Chart Explorer: opened by clicking a dashboard chart; playback is held paused while open -
+  // - Chart Explorer: opened by clicking a dashboard chart; playback keeps running -
   const openExplorer = (spec) => (rect) => {
-    expWasPlayingRef.current = pb.playing;
-    if (pb.playing) dispatch({ type: "STOP" });
     setExplorer({ ...spec, t0: Math.max(spec.t0, REAL_DATA_START_MS), rect, closing: false });
   };
-  const openGainExplorer = (lbSec, t0) => {
-    const lbl = lbSec < 60 ? lbSec + "s" : lbSec < 3600 ? (lbSec / 60) + "min" : (lbSec / 3600) + "hr";
-    return openExplorer({ kind: "gain", lbSec, title: lbl + " Gain", t0, t1: curTime });
+  const openGainExplorer = (lbSec, t0) => openExplorer({ kind: "gain", lbSec, title: _expGainTitle(lbSec), t0, t1: curTime });
+  // Shown title: Excess prefix, and "avg" for per-minute gain charts.
+  const expDispTitle = (c) => (exChartsOn ? "Excess " : "") + (c.kind === "gain" && dashGainPerMin && c.lbSec >= 60 ? c.title.replace("Gain", "avg") : c.title);
+  // Picker list; a lookback not in EXP_CHARTS (e.g. a toggled multiple) is added so it stays selectable.
+  const expCharts = (() => {
+    const list = explorer && !EXP_CHARTS.some(c => _expChartKey(c) === _expChartKey(explorer))
+      ? [...EXP_CHARTS, { kind: explorer.kind, lbSec: explorer.lbSec, title: explorer.title }].sort((a, b) => (a.kind === "gain") - (b.kind === "gain") || (a.lbSec || 0) - (b.lbSec || 0))
+      : EXP_CHARTS;
+    return list.map(c => ({ ...c, key: _expChartKey(c), label: expDispTitle(c) }));
+  })();
+  // Switching keeps the Explorer mounted, so the current zoom/pan window carries over.
+  const pickExplorerChart = (key) => {
+    const c = expCharts.find(o => o.key === key);
+    if (c) setExplorer(e => e && { ...e, kind: c.kind, lbSec: c.lbSec, title: c.title });
   };
   const closeExplorer = useCallback(() => setExplorer(e => (e && !e.closing) ? { ...e, closing: true } : e), []);
-  const finishExplorer = useCallback(() => {
-    setExplorer(null);
-    if (expWasPlayingRef.current) dispatch({ type: "PLAY" });
-    expWasPlayingRef.current = false;
-  }, []);
+  const finishExplorer = useCallback(() => setExplorer(null), []);
   useEffect(() => {
-    if (explorer && !explorer.closing && pb.playing) dispatch({ type: "STOP" });
-  }, [explorer, pb.playing]);
-  useEffect(() => {
-    if (view !== "dashboard") { setExplorer(null); expWasPlayingRef.current = false; }
+    if (view !== "dashboard") setExplorer(null);
   }, [view]);
   const renderExplorerOverlay = (barH) => explorer && createPortal(
     <DashExpandOverlay rect={explorer.rect} top={barH} closing={explorer.closing} onClose={closeExplorer} onClosed={finishExplorer}>
@@ -7644,8 +7704,9 @@ export default function SocialBladeLive() {
         perMin: explorer.kind === "gain" && dashGainPerMin,
         // Charts Show Excess: the Explorer plots the Excess vs OTL series too.
         excess: exChartsOn,
-        title: (exChartsOn ? "Excess " : "") + (explorer.kind === "gain" && dashGainPerMin && explorer.lbSec >= 60 ? explorer.title.replace("Gain", "avg") : explorer.title) }} curTime={curTime} ready={exChartsOn ? excessReady : realDataReady} onClose={closeExplorer}
-        onSeek={(ts) => { const p = tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, ts))); setPos(p); posRef.current = p; expWasPlayingRef.current = false; dispatch({type:"STOP"}); clearRT(); dispatch({type:"BUMP_SEEK"}); }}
+        title: expDispTitle(explorer) }} curTime={curTime}
+        charts={expCharts} chartKey={_expChartKey(explorer)} onPickChart={pickExplorerChart} ready={exChartsOn ? excessReady : realDataReady} onClose={closeExplorer}
+        onSeek={(ts) => { const p = tsToPos(Math.max(REAL_DATA_START_MS, Math.min(REAL_DATA_END_MS, ts))); setPos(p); posRef.current = p; dispatch({type:"STOP"}); clearRT(); dispatch({type:"BUMP_SEEK"}); }}
         dc={eDC} dev={devMode} chan={dashChanFilter}/>
     </DashExpandOverlay>,
     document.body);
@@ -8373,7 +8434,11 @@ export default function SocialBladeLive() {
                 {ALL_MODES.map(m=><option key={m.key} value={m.key}>{m.label}</option>)}
               </select>
               {isRTMode && <div style={{display:"flex",alignItems:"center",gap:4,width:148}}>
-                <input type="range" min={1} max={3} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:116,accentColor:"#c05050",cursor:"pointer"}}/>
+                <div style={{position:"relative",width:116,display:"flex",alignItems:"center"}}>
+                  <input type="range" min={1} max={5} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:116,margin:0,accentColor:"#c05050",cursor:"pointer"}}/>
+                  {/* Step dividers: one per option, inset by half the thumb width (16px); skipped under the thumb */}
+                  {[0,1,2,3,4].filter(i => i !== rtInterval - 1).map(i => <div key={i} style={{position:"absolute",left:`calc(8px + ${i/4} * (100% - 16px) - 1px)`,top:"50%",width:2,height:4,transform:"translateY(-50%)",background:"#888",pointerEvents:"none"}}/>)}
+                </div>
                 <span style={{fontSize:11,color:"#b07070",minWidth:20}}>{rtInterval}s</span>
               </div>}
               {/* Mult slider in log10-space: -1..2 = 0.1x..100x; 0 = 1x centered */}
