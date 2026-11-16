@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer, useLayoutEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, useReducer, useLayoutEffect } from "react";
 import { FLARE_NEWS_ENTRIES as _REAL_NEWS, FLARE_PROMOTIONS as _REAL_PROMOS, PROMO_DISPLAY_START_MS, ALT_NEWS_ENTRIES, ALT_PROMOTIONS } from './flareNewsData.js';
 import { VOTE_LOG } from './flareVoteData.js';
 import ReactDOM from 'react-dom/client';
@@ -4418,7 +4418,7 @@ const endDots = (data, tCur, specs) => {
           {[...placed].sort((a,b) => a.val - b.val).map(({key, val, displayVal, color, fmtMode, cx, cy, ly}) => (
             <g key={key}>
               <circle cx={cx} cy={cy} r={4} fill={color} stroke="#ffffff" strokeWidth={1.5}/>
-              <text x={cx+10} y={ly+4} fill={color} fontSize={11} fontFamily="Inter,system-ui,sans-serif" fontWeight={600}>{fmt(displayVal,fmtMode)}</text>
+              <text x={cx+10} y={ly+4} fill={color} fontSize={11} fontFamily="Inter,Roboto,system-ui,sans-serif" fontWeight={600}>{fmt(displayVal,fmtMode)}</text>
             </g>
           ))}
         </g>
@@ -4872,7 +4872,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, onSeek, dc, dev, chan, c
     const span = t1 - t0;
     const X = (t) => EXP_PAD.l + (t - t0) / span * pw;
     const Y = (v) => EXP_PAD.t + (1 - (v - ylo) / (yhi - ylo)) * ph;
-    ctx.font = "11px Inter, system-ui, sans-serif";
+    ctx.font = "11px Inter, Roboto, system-ui, sans-serif";
 
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
@@ -6934,7 +6934,7 @@ export default function SocialBladeLive() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, []);
-  const dashFont = "'Inter',system-ui,-apple-system,'Segoe UI',sans-serif";
+  const dashFont = "'Inter','Roboto',system-ui,-apple-system,'Segoe UI',sans-serif";
 
   // flareHides/FLARE_HIDDEN removed with Flare decoupling; stub left so
   // `!flareHides(key) && X` sites keep rendering X until their guards are
@@ -7871,15 +7871,15 @@ export default function SocialBladeLive() {
     return (
       <DashChartCard title={(cfg.viewPrefix || "") + ((dashGainPerMin && lbMins >= 1) ? cfg.gainLabels[effectiveCi].replace("Gain", "avg") : cfg.gainLabels[effectiveCi])} dc={eDC} controls={cardControls} onExpand={insufficient ? undefined : openGainExplorer(Math.round(lb * 3600), tMin)}>
         {insufficient ? (
-          <div style={{height:h,display:"flex",alignItems:"center",justifyContent:"center",color:eDC.DIM,fontSize:13,fontFamily:"Inter,system-ui,sans-serif"}}>Insufficient history</div>
+          <div style={{height:h,display:"flex",alignItems:"center",justifyContent:"center",color:eDC.DIM,fontSize:13,fontFamily:"Inter,Roboto,system-ui,sans-serif"}}>Insufficient history</div>
         ) : (
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gdLive} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksG} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksG} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {allMidnightsG.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
             {auditLines.map((a,i)=>{ const ch=appMode==='real'?a.channel:a[1]; const ts=appMode==='real'?a.ms:a[3]; const m=auditChans.find(mm=>mm.ch===ch); return <ReferenceLine key={"aud"+i} x={ts} stroke={m.color} strokeWidth={1} strokeDasharray="2 4" strokeOpacity={0.45} ifOverflow="hidden"/>; })}
-            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
+            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gdLive, tMin)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1}/>
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.lineA.key} stroke={cfg.lineA.color} strokeWidth={1.8} dot={false} name={cfg.lineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
@@ -7936,9 +7936,9 @@ export default function SocialBladeLive() {
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gd} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksGap} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksGap} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {allMidnightsGap.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
-            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
+            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gd, tMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey="gap" stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.gapName} isAnimationActive={false}/>
@@ -7982,8 +7982,8 @@ export default function SocialBladeLive() {
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={[tMin, curTime]} allowDataOverflow tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
-            <YAxis tickFormatter={v=>fmt(v)} domain={dom} ticks={yTicks} allowDataOverflow tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52}/>
+            <XAxis dataKey="t" type="number" domain={[tMin, curTime]} allowDataOverflow tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <YAxis tickFormatter={v=>fmt(v)} domain={dom} ticks={yTicks} allowDataOverflow tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52}/>
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1}/>
             <Line type="monotone" dataKey="pdp" stroke={pdpColor} strokeWidth={1.5} dot={false} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>
             <Line type="monotone" dataKey="ts"  stroke={tsColor}  strokeWidth={1.5} dot={false} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>
@@ -8331,9 +8331,9 @@ export default function SocialBladeLive() {
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={totalData} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={totXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <XAxis dataKey="t" type="number" domain={totXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
-            <YAxis tickFormatter={v=>fmt(v,cfg.totalFmt||"subs")} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={totDom} allowDataOverflow ticks={totTicks}/>
+            <YAxis tickFormatter={v=>fmt(v,cfg.totalFmt||"subs")} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={totDom} allowDataOverflow ticks={totTicks}/>
             {!isRTMode && <Tooltip content={<DashTooltip fmtMode={cfg.totalFmt||"subs"} dc={eDC} {...dashAuditTip(cfg.totalData, totTMin)}/>}/>}
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.totalLineA.key} stroke={cfg.totalLineA.color} strokeWidth={2} dot={false} name={cfg.totalLineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.totalLineB.key} stroke={cfg.totalLineB.color} strokeWidth={2} dot={false} name={cfg.totalLineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
@@ -8347,9 +8347,9 @@ export default function SocialBladeLive() {
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={totalData} margin={{top:4,right:70,bottom:0,left:0}}>
             <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={gapXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <XAxis dataKey="t" type="number" domain={gapXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
-            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={gapDom} allowDataOverflow ticks={gapTicks}/>
+            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={gapDom} allowDataOverflow ticks={gapTicks}/>
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(cfg.totalData, totTMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey={cfg.totalGapKey} stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.totalGapName} isAnimationActive={false}/>
@@ -8380,22 +8380,21 @@ export default function SocialBladeLive() {
   const _sbColR       = 1009.3175 - 561 * 1.035 / 2;
 
   return (
-    <div style={{ background:"#000", minHeight:"100vh", overflow:"hidden", fontFamily:"'Inter',system-ui,-apple-system,'Segoe UI',sans-serif" }}>
-      {/* Flare theme assets: load Roboto at the weights FlareView needs.
-          No blanket !important rules - FlareView sets font-family and
-          font-weight explicitly per element so mixed weights and non-Roboto
-          display fonts (Compose Black Oblique, etc.) render correctly.
-          Inter is loaded for the Dashboard chrome (charts, controls, labels);
-          FlareView overrides explicitly so it stays Roboto/CBO. */}
+    <div style={{ background:"#000", minHeight:"100vh", overflow:"hidden", fontFamily:"'Inter','Roboto',system-ui,-apple-system,'Segoe UI',sans-serif" }}>
+      {/* Roboto is bundled (index.html, dist/data). No blanket !important rules -
+          FlareView sets font-family and font-weight explicitly per element so mixed
+          weights and non-Roboto display fonts (Compose Black Oblique, etc.) render
+          correctly. Inter is loaded for the Dashboard chrome (charts, controls,
+          labels), falling back to Roboto; FlareView overrides explicitly so it
+          stays Roboto/CBO. */}
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
       `}</style>
       {barHidden && <div style={{ position:"fixed", top:16, left:"50%", transform:`translate(-50%, ${barHintVisible ? 0 : -12}px)`, opacity:barHintVisible ? 1 : 0, transition:"opacity 0.2s, transform 0.2s", pointerEvents:"none", zIndex:10000, background:"rgba(14,16,24,0.95)", color:"#fff", border:"1px solid #2d4060", borderRadius:8, padding:"12px 24px", fontSize:20, fontWeight:600, boxShadow:"0 6px 24px rgba(0,0,0,0.6)", whiteSpace:"nowrap" }}>
         Press <span style={{ display:"inline-block", background:"#1a2535", color:"#7cb9f7", border:"1px solid #2d4060", borderRadius:4, padding:"0 8px", margin:"0 2px" }}>H</span> to show playback bar
       </div>}
       {/* - Control Bar - */}
-      {!barHidden && <div data-controlbar ref={ctrlBarRef} style={{ borderBottom:"1px solid #333", fontFamily:"'Inter',system-ui,-apple-system,'Segoe UI',sans-serif", fontSize:12, color:"#ccc" }}>
+      {!barHidden && <div data-controlbar ref={ctrlBarRef} style={{ borderBottom:"1px solid #333", fontFamily:"'Inter','Roboto',system-ui,-apple-system,'Segoe UI',sans-serif", fontSize:12, color:"#ccc" }}>
         {menuOpen && <div style={{ padding:"4px 14px 6px", display:"flex", alignItems:"stretch", gap:0, rowGap:6, flexWrap:"wrap", whiteSpace:"nowrap" }}>
 
           {/* PLAY */}

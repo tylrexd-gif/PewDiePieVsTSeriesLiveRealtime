@@ -7,7 +7,7 @@
     <link rel="icon" type="image/jpeg" href="/favicon.jpg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Montserrat:ital,wght@0,900;1,900&family=Roboto:wght@400;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
       @font-face {
         font-family: 'Twemoji Country Flags';
@@ -38,6 +38,52 @@
              url('/data/Compose Black.ttf') format('truetype'),
              url('/data/ComposeBlack.ttf') format('truetype');
       }
+      /* Bundled so the SB tables render the same on machines without Times New Roman. */
+      @font-face {
+        font-family: 'Times New Roman';
+        font-style: normal;
+        font-weight: 400;
+        src: url('/data/Times New Roman.ttf') format('truetype');
+      }
+      @font-face {
+        font-family: 'Times New Roman';
+        font-style: normal;
+        font-weight: 700;
+        src: url('/data/Times New Roman - Bold.ttf') format('truetype');
+      }
+      @font-face {
+        font-family: 'Times New Roman';
+        font-style: italic;
+        font-weight: 400;
+        src: url('/data/Times New Roman - Italic.ttf') format('truetype');
+      }
+      @font-face {
+        font-family: 'Times New Roman';
+        font-style: italic;
+        font-weight: 700;
+        src: url('/data/Times New Roman - Bold Italic.ttf') format('truetype');
+      }
+      /* Roboto: SB / Flare text and the fallback after Inter. */
+      @font-face { font-family: 'Roboto'; font-style: normal; font-weight: 300; src: url('/data/Roboto-Light.ttf') format('truetype'); }
+      @font-face { font-family: 'Roboto'; font-style: normal; font-weight: 400; src: url('/data/Roboto-Regular.ttf') format('truetype'); }
+      @font-face { font-family: 'Roboto'; font-style: italic; font-weight: 400; src: url('/data/Roboto-Italic.ttf') format('truetype'); }
+      @font-face { font-family: 'Roboto'; font-style: normal; font-weight: 500; src: url('/data/Roboto-Medium.ttf') format('truetype'); }
+      @font-face { font-family: 'Roboto'; font-style: normal; font-weight: 700; src: url('/data/Roboto-Bold.ttf') format('truetype'); }
+      @font-face { font-family: 'Roboto'; font-style: italic; font-weight: 700; src: url('/data/Roboto-BoldItalic.ttf') format('truetype'); }
+      @font-face { font-family: 'Roboto'; font-style: normal; font-weight: 900; src: url('/data/Roboto-Black.ttf') format('truetype'); }
+      @font-face { font-family: 'Roboto Black'; font-style: normal; font-weight: 900; src: url('/data/Roboto-Black.ttf') format('truetype'); }
+      /* Arial and Arial Black. */
+      @font-face { font-family: 'Arial'; font-style: normal; font-weight: 400; src: url('/data/Arial.ttf') format('truetype'); }
+      @font-face { font-family: 'Arial'; font-style: italic; font-weight: 400; src: url('/data/Arial-Italic.ttf') format('truetype'); }
+      @font-face { font-family: 'Arial'; font-style: normal; font-weight: 700; src: url('/data/Arial-Bold.ttf') format('truetype'); }
+      @font-face { font-family: 'Arial'; font-style: italic; font-weight: 700; src: url('/data/Arial-BoldItalic.ttf') format('truetype'); }
+      @font-face { font-family: 'Arial Black'; font-style: normal; font-weight: 400 900; src: url('/data/Arial-Black.ttf') format('truetype'); }
+      /* Lucida Sans Unicode: SB chart time axes. */
+      @font-face { font-family: 'Lucida Sans Unicode'; font-style: normal; font-weight: 400; src: url('/data/Lucida Sans Unicode.ttf') format('truetype'); }
+      /* Montserrat Black, under the names the Flare headings ask for. */
+      @font-face { font-family: 'Montserrat Black Italic'; font-style: italic; font-weight: 400 900; src: url('/data/Montserrat-BlackItalic.woff2') format('woff2'); }
+      @font-face { font-family: 'Montserrat Black'; font-style: normal; font-weight: 400 900; src: url('/data/Montserrat-Black.woff2') format('woff2'); }
+      @font-face { font-family: 'Montserrat Black'; font-style: italic; font-weight: 400 900; src: url('/data/Montserrat-BlackItalic.woff2') format('woff2'); }
       body { margin: 0; background: #0a0a0a; font-family: 'Twemoji Country Flags', sans-serif; }
       #loading {
         position: fixed; inset: 0; z-index: 99999; background: #0a0a0a;
