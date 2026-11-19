@@ -15,12 +15,12 @@ const filters = process.argv.slice(2).filter(a => !a.startsWith('--'));
 const mb = b => (b / 1e6).toFixed(1) + ' MB';
 
 let failed = 0;
-for (const [bin, packed, startMs] of PACK_JOBS) {
+for (const [bin, packed, startMs, patches = []] of PACK_JOBS) {
   if (filters.length && !filters.some(f => bin.includes(f))) continue;
   const inPath = path.join(DATA, bin), outPath = path.join(DATA, packed);
   if (!fs.existsSync(inPath)) { console.log(`skip    ${bin} (missing)`); continue; }
   try {
-    const r = force ? packBinary(inPath, outPath, startMs) : packIfStale(inPath, outPath, startMs);
+    const r = force ? packBinary(inPath, outPath, startMs, patches) : packIfStale(inPath, outPath, startMs, patches);
     if (r) console.log(`packed  ${bin} -> ${packed}: ${mb(r.inBytes)} -> ${mb(r.outBytes)} (${r.n} s, ${r.exceptions} exceptions)`);
     else console.log(`current ${packed}`);
   } catch (e) { failed++; console.error(`FAILED  ${bin}: ${e.message}`); }

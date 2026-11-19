@@ -20,9 +20,9 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : DATA_ONLY ? 8081 : 
 // The app loads the packed (.pvd.gz) per-second files; the .bin files are the local
 // masters. Re-pack any master that is newer than its packed copy (e.g. a fresh
 // Scenario export dropped in as scenario-pdp-ts.bin), so the app never sees stale data.
-for (const [bin, packed, startMs] of PACK_JOBS) {
+for (const [bin, packed, startMs, patches = []] of PACK_JOBS) {
   try {
-    const r = packIfStale(path.join(ROOT, 'data', bin), path.join(ROOT, 'data', packed), startMs);
+    const r = packIfStale(path.join(ROOT, 'data', bin), path.join(ROOT, 'data', packed), startMs, patches);
     if (r) console.log(`Packed ${bin} -> ${packed}: ${(r.inBytes / 1e6).toFixed(1)} MB -> ${(r.outBytes / 1e6).toFixed(1)} MB`);
   } catch (e) { console.error(`Could not pack ${bin}: ${e.message}`); }
 }

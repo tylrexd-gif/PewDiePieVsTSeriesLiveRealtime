@@ -17,11 +17,30 @@
 // Per-second changes almost always fit in a byte; only audit-sized jumps go to the
 // exception table. Decoding is bit-exact.
 //
+// patchPaths: packed PVD1 files whose seconds replace the input's where they overlap
+// (matched by time; in order, a later one wins). The input file is never modified.
+//
 // CLI:  node scripts/pack-bin.mjs <in.bin> <out.pvd.gz> [startMs]
 import fs from 'fs';
+import path from 'path';
 import zlib from 'zlib';
+import { unpackPVD } from '../src/pvd.js';
 
-export function packBinary(inPath, outPath, startMsForRaw) {
+function applyPatches(vals, startMs, stepMs, n, nCh, patchPaths) {
+  for (const p of patchPaths) {
+    const gz = zlib.gunzipSync(fs.readFileSync(p));
+    const pk = unpackPVD(gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength), vals.constructor);
+    if (pk.stepMs !== stepMs || pk.nCh !== nCh) throw new Error(`patch ${path.basename(p)}: step/channels differ from the input`);
+    const s0 = Math.round((pk.startMs - startMs) / stepMs);
+    for (let i = 0; i < pk.n; i++) {
+      const j = s0 + i;
+      if (j < 0 || j >= n) continue;
+      for (let c = 0; c < nCh; c++) vals[j * nCh + c] = pk.data[i * nCh + c];
+    }
+  }
+}
+
+export function packBinary(inPath, outPath, startMsForRaw, patchPaths = []) {
   const buf = fs.readFileSync(inPath);
   const isNPT1 = buf.length >= 24 && buf.toString('latin1', 0, 4) === 'NPT1';
   let startMs, stepMs, n, nCh, vals;
@@ -39,6 +58,7 @@ export function packBinary(inPath, outPath, startMsForRaw) {
     vals = new Uint32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
     n = vals.length / nCh;
   }
+  applyPatches(vals, startMs, stepMs, n, nCh, patchPaths);
   const deltas = new Int8Array(nCh * (n - 1));
   const exc = [];
   for (let i = 1; i < n; i++) {
@@ -60,11 +80,12 @@ export function packBinary(inPath, outPath, startMsForRaw) {
   return { n, nCh, exceptions: exc.length / 3, inBytes: buf.length, outBytes: packed.length };
 }
 
-// Re-pack when the master .bin is newer than its packed copy (or the copy is missing).
-export function packIfStale(inPath, outPath, startMsForRaw) {
+// Re-pack when the master .bin or one of its patches is newer than the packed copy (or the copy is missing).
+export function packIfStale(inPath, outPath, startMsForRaw, patchPaths = []) {
   if (!fs.existsSync(inPath)) return null;
-  if (fs.existsSync(outPath) && fs.statSync(outPath).mtimeMs >= fs.statSync(inPath).mtimeMs) return null;
-  return packBinary(inPath, outPath, startMsForRaw);
+  const newest = Math.max(...[inPath, ...patchPaths].map(p => fs.statSync(p).mtimeMs));
+  if (fs.existsSync(outPath) && fs.statSync(outPath).mtimeMs >= newest) return null;
+  return packBinary(inPath, outPath, startMsForRaw, patchPaths);
 }
 
 if (process.argv[1] && process.argv[1].endsWith('pack-bin.mjs')) {

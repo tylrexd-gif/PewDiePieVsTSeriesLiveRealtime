@@ -101,15 +101,19 @@ export const FLARE_PROMOTIONS = [
   { ms: Date.UTC(2018, 10,  2, 18,  0, 0), channel: 'pdp', by: 'VoiceOverPete' },    // Nov  2  2PM EDT
   { ms: Date.UTC(2018, 10,  6, 23,  0, 0), channel: 'pdp', by: 'FBE' },              // Nov  6  6PM EST
   { ms: Date.UTC(2018, 10, 11, 14,  0, 0), channel: 'pdp', by: 'Saiman Says' },      // Nov 11  9AM EST
+  { ms: Date.UTC(2018, 10, 25, 17,  0, 0), channel: 'pdp', by: 'Leo Otaco' },        // Nov 25 12PM EST
   { ms: Date.UTC(2018, 10, 25, 22,  0, 0), channel: 'pdp', by: 'MrBeast' },          // Nov 25  5PM EST
+  { ms: Date.UTC(2018, 10, 27,  0,  0, 0), channel: 'pdp', by: 'DramaAlert' },       // Nov 26  7PM EST
   { ms: Date.UTC(2018, 10, 28, 13,  0, 0), channel: 'pdp', by: 'Davie504' },         // Nov 28  8AM EST
   { ms: Date.UTC(2018, 10, 30, 23,  0, 0), channel: 'pdp', by: 'Justin Roberts' },   // Nov 30  6PM EST
   { ms: Date.UTC(2018, 11,  1, 21,  0, 0), channel: 'pdp', by: 'Ninja' },            // Dec  1  4PM EST
   { ms: Date.UTC(2018, 11,  2, 18,  0, 0), channel: 'pdp', by: 'jacksepticeye' },    // Dec  2  1PM EST
+  { ms: Date.UTC(2018, 11,  2, 19,  0, 0), channel: 'pdp', by: 'Dawko' },            // Dec  2  2PM EST
   { ms: Date.UTC(2018, 11,  2, 22,  0, 0), channel: 'pdp', by: 'Markiplier' },       // Dec  2  5PM EST
   { ms: Date.UTC(2018, 11,  2, 22,  0, 0), channel: 'pdp', by: 'boogie2988' },       // Dec  2  5PM EST
   { ms: Date.UTC(2018, 11,  6, 23,  0, 0), channel: 'pdp', by: 'Logan Paul Vlogs' }, // Dec  6  6PM EST
   { ms: Date.UTC(2018, 11, 10, 23,  0, 0), channel: 'pdp', by: 'Miniminter' },       // Dec 10  6PM EST
+  { ms: Date.UTC(2018, 11, 11, 22,  0, 0), channel: 'pdp', by: 'TGFBro' },           // Dec 11  5PM EST
   { ms: Date.UTC(2018, 11, 16, 22,  0, 0), channel: 'pdp', by: 'MrBeast' },
   { ms: Date.UTC(2018, 11, 18, 22,  0, 0), channel: 'pdp', by: 'JuegaGerman' },       
   { ms: Date.UTC(2018, 11, 19, 21,  0, 0), channel: 'pdp', by: 'QuackityHQ' },         
@@ -131,7 +135,9 @@ export const FLARE_PROMOTIONS = [
   { ms: Date.UTC(2019, 1, 22, 4,  0, 0), channel: 'pdp', by: 'ItsYeBoi' },                          
   { ms: Date.UTC(2019, 2, 1, 18,  0, 0), channel: 'pdp', by: 'KSI' },                               
   { ms: Date.UTC(2019, 2, 2, 22,  0, 0), channel: 'pdp', by: 'jacksfilms' },                                
-  { ms: Date.UTC(2019, 2, 3, 22,  0, 0), channel: 'pdp', by: 'VoiceOverPete' },                                
+  { ms: Date.UTC(2019, 2, 3, 22,  0, 0), channel: 'pdp', by: 'VoiceOverPete' },
+  { ms: Date.UTC(2019, 2, 4, 12,  0, 0), channel: 'pdp', by: 'Captain India' },
+  { ms: Date.UTC(2019, 2, 5, 22,  0, 0), channel: 'pdp', by: 'REACT' },
   { ms: Date.UTC(2019, 2, 11, 22,  0, 0), channel: 'pdp', by: 'Voce Sabia?' },                                  
   { ms: Date.UTC(2019, 2, 14, 20,  0, 0), channel: 'pdp', by: 'h3h3 Productions' },                                 
   { ms: Date.UTC(2019, 2, 19, 14,  0, 0), channel: 'pdp', by: 'RedhoodVN' },                     

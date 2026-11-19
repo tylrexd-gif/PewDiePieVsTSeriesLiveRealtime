@@ -76,7 +76,26 @@ const _spliceDailyAlt = (real, alt) => {
 };
 // Flare news / promotions: AltScen keeps real entries before ALT_START_MS, then only
 // the Alt Scenario exclusive lists (real later events would contradict the scenario).
-let FLARE_NEWS_ENTRIES, FLARE_PROMOTIONS, SBD_REAL, FTVD_REAL, REAL_AUDITS, REAL_AUDITS_MAJOR;
+let FLARE_NEWS_ENTRIES, FLARE_PROMOTIONS, SBD_REAL, FTVD_REAL, REAL_AUDITS, REAL_AUDITS_MAJOR, REAL_AUDITS_SHOWN;
+// For display (markers, labels, the Audit Time table): an audit spread over consecutive
+// seconds of one channel (+700, +268 a second later) is one audit at its first second with
+// the summed magnitude. Gain stripping keeps the per-second rows, which match the data.
+function _groupAuditSeconds(list) {
+  const out = [], open = {};
+  for (const a of list) {
+    const g = open[a.channel];
+    if (g && a.ms - g.lastMs <= 1000) {
+      g.magnitude += a.magnitude;
+      g.minute_total = (g.minute_total ?? 0) + (a.minute_total ?? a.magnitude);
+      g.lastMs = a.ms;
+      continue;
+    }
+    const n = { ...a, minute_total: a.minute_total ?? a.magnitude, lastMs: a.ms };
+    open[a.channel] = n;
+    out.push(n);
+  }
+  return out;
+}
 _onAltScen(() => {
   FLARE_NEWS_ENTRIES = DATA_100M ? [] : ALT_SCEN ? [..._REAL_NEWS.filter(e => e.ms < ALT_START_MS), ...ALT_NEWS_ENTRIES] : _REAL_NEWS;
   FLARE_PROMOTIONS   = DATA_100M ? [] : ALT_SCEN ? [..._REAL_PROMOS.filter(e => e.ms < ALT_START_MS), ...ALT_PROMOTIONS] : _REAL_PROMOS;
@@ -99,6 +118,7 @@ _onAltScen(() => {
   // Only major events (type === 'audit') are used for chart markers, gain stripping, and the
   // Audit Time table. Minor events are detected but excluded from all UI.
   REAL_AUDITS_MAJOR = REAL_AUDITS.filter(a => a.type === 'audit');
+  REAL_AUDITS_SHOWN = _groupAuditSeconds(REAL_AUDITS_MAJOR);
 });
 
 import pdpIcon from './assets/pdpIcon.jpg';
@@ -324,13 +344,27 @@ const _cumAuditIn = (arr, pfx, t) => {
 };
 // Returns cumulative audit magnitude for channel ch at all events with ms <= t.
 const getRdCumAudit = (t, ch) => ch === 'pdp' ? _cumAuditIn(_rdAuditPdp, _rdAuditPdpPfx, t) : _cumAuditIn(_rdAuditTs, _rdAuditTsPfx, t);
+// Channel ch's latest audit at or before t, if it fell within windowMs: { mag, ms } (ms =
+// when it began), else null. The detector often splits one audit over neighbouring seconds
+// (+7917 then +92 a second later), so rows chained <= AUDIT_MERGE_MS apart count as one
+// audit and are summed.
+const AUDIT_MERGE_MS = 60_000;
+const getRdLastAudit = (t, ch, windowMs) => {
+  const arr = ch === 'pdp' ? _rdAuditPdp : _rdAuditTs;
+  let lo = 0, hi = arr.length - 1, res = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (arr[mid].ms <= t) { res = mid; lo = mid + 1; } else hi = mid - 1; }
+  if (res < 0 || t - arr[res].ms > windowMs) return null;
+  let mag = arr[res].magnitude, i = res;
+  for (; i > 0 && arr[i].ms - arr[i - 1].ms <= AUDIT_MERGE_MS; i--) mag += arr[i - 1].magnitude;
+  return { mag, ms: arr[i].ms };
+};
 // Excess vs OTL (Alt Scenario only): the audits of the excess series (Alt minus OTL, where
 // OTL = the real timeline: real data, then the extension export). From ALT_START_MS: the
 // Alt audits with their magnitude, the OTL audits negated (before it both are the same and
 // cancel). Same shape as _rdAuditPdp/_rdAuditTs + prefix sums.
-let _exAuditPdp = [], _exAuditTs = [], _exAuditPdpPfx = [], _exAuditTsPfx = [], EX_AUDITS_MAJOR = [];
+let _exAuditPdp = [], _exAuditTs = [], _exAuditPdpPfx = [], _exAuditTsPfx = [], EX_AUDITS_MAJOR = [], EX_AUDITS_SHOWN = [];
 _onAltScen(() => {
-  if (!ALT_SCEN) { _exAuditPdp = _exAuditTs = _exAuditPdpPfx = _exAuditTsPfx = EX_AUDITS_MAJOR = []; return; }
+  if (!ALT_SCEN) { _exAuditPdp = _exAuditTs = _exAuditPdpPfx = _exAuditTsPfx = EX_AUDITS_MAJOR = EX_AUDITS_SHOWN = []; return; }
   const otl = [..._arr('REAL_AUDITS').filter(a => a.ms < EXT_START_MS), ..._arr('EXT_AUDITS')
     .map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta }))
     .filter(a => a.ms >= EXT_START_MS)];
@@ -338,6 +372,7 @@ _onAltScen(() => {
     ...REAL_AUDITS_MAJOR.filter(a => a.ms >= ALT_START_MS),
     ...otl.filter(a => a.type === 'audit' && a.ms >= ALT_START_MS).map(a => ({ ...a, magnitude: -a.magnitude })),
   ].sort((x, y) => x.ms - y.ms);
+  EX_AUDITS_SHOWN = _groupAuditSeconds(EX_AUDITS_MAJOR);
   _exAuditPdp = EX_AUDITS_MAJOR.filter(a => a.channel === 'pdp');
   _exAuditTs  = EX_AUDITS_MAJOR.filter(a => a.channel === 'ts');
   _exAuditPdpPfx = _rdMkPfx(_exAuditPdp);
@@ -895,7 +930,8 @@ async function _loadMergedExport(file, exportFile, pairCount) {
 
 // - REAL-DATA PATCHES -
 // Separately stored pieces of real per-second data, spliced over the real timeline at load
-// time so they survive a regenerated real-pdp-ts export. Each file is a packed PVD1
+// time so they survive a regenerated real-pdp-ts export. (Patches to the master real binary
+// are applied when it is packed instead: REAL_SOURCE_PATCHES in scripts/pack-jobs.mjs.) Each file is a packed PVD1
 // (.pvd.gz, see app/scripts/pack-bin.mjs) of [pdp, ts] per second on the real-pdp-ts clock
 // (US Eastern labelled as UTC, shifted by ALT_TZ_SHIFT_MS); every second it covers replaces
 // the loaded data. Applied in list order (a later file wins where they overlap). A file that
@@ -1012,6 +1048,17 @@ function realDataAt(t) {
   if (t < REAL_DATA_START_MS || t > REAL_DATA_END_MS) return null;
   const idx = Math.max(0, Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t - REAL_DATA_START_MS) / 1000)));
   return { pdp: _realDataBuf[idx * 2], ts: _realDataBuf[idx * 2 + 1] };
+}
+
+// realDataAt with a linear blend between neighbouring seconds (fractional values).
+// Used by the rAF-paced 1m / Dynamic playback so counters and charts glide instead
+// of stepping once per data-second.
+function realDataAtLerp(t) {
+  if (!_realDataBuf) return null;
+  if (t < REAL_DATA_START_MS || t > REAL_DATA_END_MS) return null;
+  const pos = Math.max(0, Math.min(REAL_DATA_PAIR_COUNT - 1, (t - REAL_DATA_START_MS) / 1000));
+  const i = Math.floor(pos), j = Math.min(REAL_DATA_PAIR_COUNT - 1, i + 1), f = pos - i;
+  return { pdp: lerp(_realDataBuf[i * 2], _realDataBuf[j * 2], f), ts: lerp(_realDataBuf[i * 2 + 1], _realDataBuf[j * 2 + 1], f) };
 }
 
 // 100M: {pdp, ts} before its data starts, for long lookbacks. Hourly real counts (labelled
@@ -1992,6 +2039,60 @@ const getDynSpeed = (absGap) => {
   if (absGap < 300000)  return 2000;
   if (absGap < 1000000) return 2500;
   return 3000;
+};
+
+// Snap a slowed ladder rate to a round number (1700/8 = 212.5 -> 200, 1500/8 -> 200).
+const roundDynRate = (r) => {
+  const step = r < 10 ? 1 : r < 50 ? 5 : r < 100 ? 10 : r < 500 ? 50 : 100;
+  return Math.max(step, Math.round(r / step) * step);
+};
+
+// Exact second a channel first reached 100M in the loaded dataset (PDP_100M_TS /
+// TS_100M_TS are the first on-the-hour sample >= 100M, so the crossing lies in the
+// hour before it). Cached per buffer / switch-time value so dataset switches recompute it.
+const _exact100m = [{ buf: null, hr: null, ms: Infinity }, { buf: null, hr: null, ms: Infinity }];
+const get100mExactMs = (col) => {   // col: 0 = PDP, 1 = TS
+  const hr = col === 0 ? PDP_100M_TS : TS_100M_TS;
+  const c = _exact100m[col];
+  if (c.buf === _realDataBuf && c.hr === hr) return c.ms;
+  let ms = hr;
+  if (_realDataBuf && isFinite(hr)) {
+    const hi = Math.round((hr - REAL_DATA_START_MS) / 1000);
+    for (let i = Math.max(0, hi - 3600); i <= hi; i++) {
+      if (_realDataBuf[i * 2 + col] >= 100000000) { ms = REAL_DATA_START_MS + i * 1000; break; }
+    }
+  }
+  _exact100m[col] = { buf: _realDataBuf, hr, ms };
+  return ms;
+};
+
+// Fixed Dynamic-mode rates (sim-sec/sec, before mult) right around each 100M moment;
+// these replace the gap ladder + slowdowns. null when neither applies.
+const getDyn100mOverride = (t) => {
+  const p = get100mExactMs(0);
+  if (isFinite(p) && Math.abs(t - p) <= 60_000) return 5;
+  const s = get100mExactMs(1);
+  if (isFinite(s) && Math.abs(t - s) <= 60_000) return 10;
+  return null;
+};
+
+// Extra Dynamic-mode slowdowns layered on the gap ladder; the strongest active one wins.
+const getDynSlowFactor = (pt, tt, t) => {
+  let f = 1;
+  if (ALT_SCEN && pt != null) {
+    const d98 = Math.abs(pt - 98_000_000);
+    if (d98 < 1000) f = Math.min(f, 1 / 4);
+    else if (d98 < 2000) f = Math.min(f, 0.5);
+  }
+  if (tt != null && Math.abs(tt - 100_000_000) < 2000) f = Math.min(f, 0.5);
+  const p100 = get100mExactMs(0);
+  if (isFinite(p100)) {
+    const dt = Math.abs(t - p100);
+    if (dt <= 30 * 60_000) f = Math.min(f, 1 / 8);
+    else if (dt <= 3600_000) f = Math.min(f, 1 / 4);
+    else if (dt <= 12 * 3600_000) f = Math.min(f, 0.5);
+  }
+  return f;
 };
 
 
@@ -4331,11 +4432,21 @@ const DashRateDisplay = React.memo(({label,value,color,dc,rt,duration,seekToken}
 // LAYOUT: Dashboard card helper - see LAYOUTS.md
 const DASH_SPARK_MS = 60 * 60000, DASH_SPARK_STEP = 1000;
 // stripAudits (Filter Audits): plot the audit-filtered total (minus getRdCumAudit).
-const DashSpark = ({ch, curTime, color, height = 30, stripAudits = false}) => {
-  const sec = Math.floor(curTime / 1000);
+// smooth (1m / Dynamic playback): window ends at curTime and samples blend between
+// data-seconds, so the line slides every frame instead of stepping once per second.
+const DashSpark = ({ch, curTime, color, height = 30, stripAudits = false, smooth = false}) => {
+  const key = smooth ? curTime : Math.floor(curTime / 1000);
   const d = useMemo(() => {
-    const t1 = sec * 1000, pts = [];
-    const at = (t) => { const v = realDataAt(t)?.[ch]; return v == null ? null : stripAudits ? v - getRdCumAudit(t, ch) : v; };
+    const t1 = smooth ? curTime : key * 1000, pts = [];
+    const atSec = (t) => { const v = realDataAt(t)?.[ch]; return v == null ? null : stripAudits ? v - getRdCumAudit(t, ch) : v; };
+    // Smooth: blend the (audit-stripped) whole-second values, so a sample inside an
+    // audit's second doesn't pair a half-blended count with the full audit step.
+    const at = !smooth ? atSec : (t) => {
+      const t0 = Math.floor(t / 1000) * 1000, a = atSec(t0);
+      if (a == null || t === t0) return a;
+      const b = atSec(t0 + 1000);
+      return b == null ? a : lerp(a, b, (t - t0) / 1000);
+    };
     for (let t = t1 - DASH_SPARK_MS; t < t1; t += DASH_SPARK_STEP) pts.push(at(t));
     pts.push(at(t1));
     const v = pts.filter(x => x != null);
@@ -4347,7 +4458,7 @@ const DashSpark = ({ch, curTime, color, height = 30, stripAudits = false}) => {
       path += (path ? "L" : "M") + (i / (pts.length - 1) * 100).toFixed(2) + " " + (100 - (x - lo) / span * 100).toFixed(2);
     });
     return path;
-  }, [sec, ch, stripAudits]);
+  }, [key, smooth, ch, stripAudits]);
   return (
     <div style={{width:"100%",height,boxSizing:"border-box",padding:"3px 4px",background:"transparent"}}>
       {d && <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{display:"block",width:"100%",height:"100%",overflow:"visible",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>
@@ -4851,7 +4962,7 @@ const ChartExplorer = ({ spec, curTime, ready, onClose, onSeek, dc, dev, chan, c
   // every chart; Filter Audits gain charts also draw a dotted line per audit.
   // Subs/gain honour the PDP/TS filter; the gap shows both channels.
   const auditChs = spec.kind === "gap" ? ["pdp", "ts"] : visIdx.map(i => i === 0 ? "pdp" : "ts");
-  const auditAll = useMemo(() => (spec.excess ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a => auditChs.includes(a.channel)),
+  const auditAll = useMemo(() => (spec.excess ? EX_AUDITS_SHOWN : REAL_AUDITS_SHOWN).filter(a => auditChs.includes(a.channel)),
     [spec.excess, visKey, spec.kind]);
   const auditMarks = spec.kind === "gain" && spec.strip;
   const hoverAudits = (hover && hoverVals) ? (() => {
@@ -5773,6 +5884,8 @@ export default function SocialBladeLive() {
       // Resuming the last visit: restore the saved playback settings.
       dispatch({type:"SET_MODE", mode: _ss.speedMode ?? "rt"});
       dispatch({type:"SET_MULT", mult: _ss.mult ?? 1});
+      // Dynamic only exists on top of 1m (SET_MODE clears it otherwise).
+      if (_ss.dyn && _ss.speedMode === "1m") dispatch({type:"TOGGLE_DYN"});
       dispatch({type:"SET_DESYNC", value: _ss.desync ?? 0.69});
       if ((_ss.minuteSnap ?? true) !== initialPlayback.minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
       if (_ss.reverse) dispatch({type:"TOGGLE_REVERSE"});
@@ -6051,21 +6164,25 @@ export default function SocialBladeLive() {
   const useNoise = isRTMode || speedMode === "1m" || isDyn;
   const rtPeriodSec = rtInterval;
 
+  // rAF-paced playback (1m / Dynamic) blends between data-seconds; RT ticks keep exact values.
+  const rdLerp = speedMode === "1m" && !isRTMode;
+  const rdAt = rdLerp ? realDataAtLerp : realDataAt;
+
   const pdp1hData = useMemo(() => {
     const pts = [];
     for (let t = tMinPdp1h; t <= pdpTime; t += 1000) {
-      const rd = realDataAt(t); if (rd) pts.push({ t, pt: rd.pdp });
+      const rd = rdAt(t); if (rd) pts.push({ t, pt: rd.pdp });
     }
     return pts;
-  }, [tMinPdp1h, pdpTime, realDataReady]);
+  }, [tMinPdp1h, pdpTime, realDataReady, rdLerp]);
 
   const ts1hData = useMemo(() => {
     const pts = [];
     for (let t = tMinTs1h; t <= tsTime; t += 1000) {
-      const rd = realDataAt(t); if (rd) pts.push({ t, tt: rd.ts });
+      const rd = rdAt(t); if (rd) pts.push({ t, tt: rd.ts });
     }
     return pts;
-  }, [tMinTs1h, tsTime, realDataReady]);
+  }, [tMinTs1h, tsTime, realDataReady, rdLerp]);
 
   // YT Music 1hr series for the SB V2 Music block (AltScen only).
   const tMinMusic1h = Math.max(MUSIC_RAW.length ? MUSIC_RAW[0].t : 0, curTime - HOUR_MS);
@@ -6084,10 +6201,10 @@ export default function SocialBladeLive() {
   const gap1hData = useMemo(() => {
     const pts = [];
     for (let t = tMinGap1h; t <= gapTime; t += 1000) {
-      const rd = realDataAt(t); if (rd) pts.push({ t, g: rd.pdp - rd.ts });
+      const rd = rdAt(t); if (rd) pts.push({ t, g: rd.pdp - rd.ts });
     }
     return pts;
-  }, [tMinGap1h, gapTime, realDataReady]);
+  }, [tMinGap1h, gapTime, realDataReady, rdLerp]);
 
   // Power-of-2 step in ms, sampled by the data actually in the window
   // (down to its 1s resolution), at any speed. Stable across small span
@@ -6168,7 +6285,7 @@ export default function SocialBladeLive() {
 
   // Current-point reference from binary buffer for Y-axis domain clamping.
   const _rdCurRef = (() => {
-    const rd = realDataAt(gapTime);
+    const rd = rdAt(gapTime);
     return rd ? { pt: rd.pdp, tt: rd.ts, g: rd.pdp - rd.ts } : null;
   })();
   const _domExtraCP = _rdCurRef ?? curPoint;
@@ -6182,7 +6299,7 @@ export default function SocialBladeLive() {
   // Domain-extra reference: the current display value at each channel's display
   // time, so the y-axis stays pinned to what is actually on screen right now.
   // Reads from binary buffer; falls back to curPoint when binary has no entry.
-  const _rdPdp = realDataAt(pdpTime), _rdTs = realDataAt(tsTime), _rdGap = realDataAt(gapTime);
+  const _rdPdp = rdAt(pdpTime), _rdTs = rdAt(tsTime), _rdGap = rdAt(gapTime);
   const _domExtraPdp = _rdPdp ? { t: pdpTime, pt: _rdPdp.pdp } : (curPoint ?? null);
   const _domExtraTs  = _rdTs  ? { t: tsTime,  tt: _rdTs.ts   } : (curPoint ?? null);
   const _domExtraGap = _rdGap ? { t: gapTime, g: _rdGap.pdp - _rdGap.ts } : (curPoint ?? null);
@@ -6319,9 +6436,9 @@ export default function SocialBladeLive() {
   const tableIntIdx = Math.max(SEEK_START, Math.min(Math.floor(tablePos), maxIdx));
   const tableFrac = tablePos - tableIntIdx;
   const tablePoint = (tableFrac > 0.001 && tableIntIdx < maxIdx) ? interpolate(tableIntIdx, tableFrac) : RAW[tableIntIdx];
-  const _rdTableNow = realDataAt(tableTime);
-  const tableDisplayPt = _rdTableNow ? _rdTableNow.pdp : (tablePoint?.pt != null ? Math.round(tablePoint.pt) : null);
-  const tableDisplayTt = _rdTableNow ? _rdTableNow.ts  : (tablePoint?.tt != null ? Math.round(tablePoint.tt) : null);
+  const _rdTableNow = rdAt(tableTime);
+  const tableDisplayPt = _rdTableNow ? Math.round(_rdTableNow.pdp) : (tablePoint?.pt != null ? Math.round(tablePoint.pt) : null);
+  const tableDisplayTt = _rdTableNow ? Math.round(_rdTableNow.ts)  : (tablePoint?.tt != null ? Math.round(tablePoint.tt) : null);
 
   // Quantize curTime to 10s buckets - rates don't change meaningfully
   // between ticks, and in rAF modes curTime fires at 60fps otherwise.
@@ -6334,8 +6451,8 @@ export default function SocialBladeLive() {
     const rdRate = (key, lb) => {
       const t1 = tableTime;
       const t0 = t1 - lb * HOUR_MS;
-      const v1 = realDataAt(t1);
-      const v0 = realDataAt(t0) ?? (DATA_100M ? m100HistoryAt(t0) : null);
+      const v1 = rdAt(t1);
+      const v0 = rdAt(t0) ?? (DATA_100M ? m100HistoryAt(t0) : null);
       if (!v1 || !v0) return null;
       return ((key === 'pdp' ? v1.pdp : v1.ts) - (key === 'pdp' ? v0.pdp : v0.ts)) / (lb * 60);
     };
@@ -6353,7 +6470,7 @@ export default function SocialBladeLive() {
       ts:    lookbacks.map(lb => rdRate('ts',  lb)),
       music: MUSIC_RAW.length ? lookbacks.map(musicRate) : null,
     };
-  }, [tableTime, realDataReady]);
+  }, [tableTime, realDataReady, rdLerp]);
 
   // - Audit Display (precomputed) -
   // AUDITS[i] = [dataIndex, channel, change, timestamp, displayTimeStr]
@@ -6368,8 +6485,8 @@ export default function SocialBladeLive() {
   const auditDisplay = useMemo(() => {
     if (appMode === 'real') {
       let pdp = null, ts = null;
-      for (let i = REAL_AUDITS_MAJOR.length - 1; i >= 0; i--) {
-        const a = REAL_AUDITS_MAJOR[i];
+      for (let i = REAL_AUDITS_SHOWN.length - 1; i >= 0; i--) {
+        const a = REAL_AUDITS_SHOWN[i];
         if (a.ms > tableTime) continue;
         if (a.channel === 'pdp' && !pdp) pdp = { time: _fmtAuditDisplayTime(a.ms), change: a.minute_total };
         if (a.channel === 'ts'  && !ts)  ts  = { time: _fmtAuditDisplayTime(a.ms), change: a.minute_total };
@@ -6431,12 +6548,19 @@ export default function SocialBladeLive() {
     if (!playing) return;
     if (isRTSpeedMode(speedMode)) return;
     let last = performance.now();
+    // Dynamic: ease the rate toward the target in log space (~0.5s to settle)
+    // so ladder / slowdown changes don't jump.
+    let smMult = effectiveMultRef.current;
     const step = (now) => {
       const dt = now - last; last = now;
       let inc;
       if (speedMode === "1m") inc = dt/60000;
       else inc = 0;
-      inc *= effectiveMultRef.current;
+      const target = effectiveMultRef.current;
+      if (isDyn && smMult > 0 && target > 0) {
+        smMult = Math.exp(lerp(Math.log(smMult), Math.log(target), 1 - Math.exp(-dt / 120)));
+      } else smMult = target;
+      inc *= smMult;
       const next = posRef.current + (reverse ? -inc : inc);
       if (!reverse && next >= effectiveMaxIdx) { posRef.current=effectiveMaxIdx; setPos(effectiveMaxIdx); dispatch({type:"STOP"}); return; }
       if (reverse && next < SEEK_START) { posRef.current=SEEK_START; setPos(SEEK_START); dispatch({type:"STOP"}); return; }
@@ -6571,12 +6695,12 @@ export default function SocialBladeLive() {
   // - Display values -
   // RT modes get values from the rtDisplay state (set by the RT tick).
   // All non-RT paths read from the binary data buffer.
-  const _rdNow = realDataAt(curTime);
+  const _rdNow = rdAt(curTime);
   const displayPt = (isRTMode && rtDisplay.pt!=null) ? rtDisplay.pt
-    : _rdNow ? _rdNow.pdp
+    : _rdNow ? Math.round(_rdNow.pdp)
     : (curPoint?.pt!=null ? Math.round(curPoint.pt) : null);
   const displayTt = (isRTMode && rtDisplay.tt!=null) ? rtDisplay.tt
-    : _rdNow ? _rdNow.ts
+    : _rdNow ? Math.round(_rdNow.ts)
     : (curPoint?.tt!=null ? Math.round(curPoint.tt) : null);
   // Raw (unrounded) for milestone bar - float updates every frame so the
   // progress pct animates continuously rather than stepping at integer boundaries.
@@ -6643,7 +6767,10 @@ export default function SocialBladeLive() {
     );
   };
   const modeBaseSec = speedMode === "1m" ? 60 : 1;
-  effectiveMult = isDyn ? mult * getDynSpeed(dynGapRef.current(pos) ?? 0) / modeBaseSec : mult;
+  const dynSlow = isDyn ? getDynSlowFactor(displayPt, displayTt, curTime) : 1;
+  const dyn100m = isDyn ? getDyn100mOverride(curTime) : null;
+  const dynRate = isDyn ? (dyn100m ?? roundDynRate(getDynSpeed(dynGapRef.current(pos) ?? 0) * dynSlow)) : null;
+  effectiveMult = isDyn ? mult * dynRate / modeBaseSec : mult;
   effectiveMultRef.current = effectiveMult;
   const currentGap = (isRTMode && rtDisplay.gap != null)
     ? rtDisplay.gap
@@ -6661,7 +6788,7 @@ export default function SocialBladeLive() {
 
   // effectiveSpeed: absolute sim-sec/real-sec shown next to the Dynamic button.
   // Multiplied by modeBaseSec so 1min/s and 1hr/s modes display the true combined rate.
-  const effectiveSpeed = isDyn ? getDynSpeed(dynGapRef.current(pos)) * mult : null;
+  const effectiveSpeed = isDyn ? dynRate * mult : null;
   const dur = rtRollAnimDuration(rtInterval, effectiveMult);
 
   // LAYOUT: SocialBlade counter helper - see LAYOUTS.md
@@ -7372,8 +7499,17 @@ export default function SocialBladeLive() {
   const _altGain48hBucket = _altBucketFor(gainCharts[5][1] * HOUR_MS);
 
   const _altPdpTsAt = (t) => {
-    const rd = exChartsOn ? excessAt(t) : realDataAt(t);
+    const rd = exChartsOn ? excessAt(t) : rdAt(t);
     return rd ? { pt: rd.pdp, tt: rd.ts } : null;
+  };
+  // Cumulative audit at t, read the way _altPdpTsAt reads the data: blended between
+  // data-seconds when the data is (rdLerp), so a sample between two seconds strips exactly
+  // the share of an audit's jump that the data shows there.
+  const _altCumAuditAt = (t, ch) => {
+    if (!rdLerp || exChartsOn) return chartCumAudit(t, ch);
+    const s = REAL_DATA_START_MS + Math.floor((t - REAL_DATA_START_MS) / 1000) * 1000, f = (t - s) / 1000;
+    const a = chartCumAudit(s, ch);
+    return f > 0 ? a + (chartCumAudit(s + 1000, ch) - a) * f : a;
   };
 
   const _altNormalizeGap = (pts) => pts.map(d => d.gap == null && d.g != null ? { ...d, gap: d.g } : d);
@@ -7423,8 +7559,8 @@ export default function SocialBladeLive() {
       if (!past) return { t, gp: null, gt: null, pt: now.pt, tt: now.tt, g: now.pt - now.tt, gap: now.pt - now.tt };
       let gp = now.pt - past.pt, gt = now.tt - past.tt;
       if (strip) {
-        gp -= chartCumAudit(t, "pdp") - chartCumAudit(t - lbMs, "pdp");
-        gt -= chartCumAudit(t, "ts")  - chartCumAudit(t - lbMs, "ts");
+        gp -= _altCumAuditAt(t, "pdp") - _altCumAuditAt(t - lbMs, "pdp");
+        gt -= _altCumAuditAt(t, "ts")  - _altCumAuditAt(t - lbMs, "ts");
       }
       return {
         t,
@@ -7719,7 +7855,7 @@ export default function SocialBladeLive() {
     if (appMode !== 'real' || !data || !data.length) return {};
     const step = data.length > 1 ? (data[data.length - 1].t - data[0].t) / (data.length - 1) : 0;
     const auditTol = Math.max((curTime - tMin) / 200, step / 2 + 500);
-    const audits = (exChartsOn ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a =>
+    const audits = (exChartsOn ? EX_AUDITS_SHOWN : REAL_AUDITS_SHOWN).filter(a =>
       a.ms >= tMin - auditTol && a.ms <= curTime && (gap || dashChanFilter === 'both' || !dashChanFilter || a.channel === dashChanFilter));
     return { audits, auditTol };
   };
@@ -7777,37 +7913,46 @@ export default function SocialBladeLive() {
       : gd_raw;
     // Exact current gain over the lookback, computed at the live display period so
     // the end-dot labels match the actual current value, not the chart's sample.
-    const _gNow = cfg.valAt ? cfg.valAt(tNew) : null;
-    const _gPast = cfg.valAt ? cfg.valAt(tNew - lbMs) : null;
     // Filter Audits. auditChans (the {ch,color} pairs) is present on every gain
     // chart when the filter is on; the live end-dot delta is audit-stripped too so
     // the dot matches the audit-free line. The dotted MARKER lines, however, are
     // only drawn on the short charts (lb <= 1h) - longer windows would be cluttered.
     const auditChans = cfg.auditMarks || null;
-    let _exGainA = (_gNow && _gPast) ? Math.round(_gNow.a - _gPast.a) : null;
-    let _exGainB = (_gNow && _gPast) ? Math.round(_gNow.b - _gPast.b) : null;
-    if (auditChans) {
-      const aA = auditChans[0] && auditChans[0].ch, aB = auditChans[1] && auditChans[1].ch;
-      const cumFn = appMode === 'real' ? chartCumAudit : getCumAudit;
-      if (_exGainA != null && aA) _exGainA -= Math.round(cumFn(tNew, aA) - cumFn(tNew - lbMs, aA));
-      if (_exGainB != null && aB) _exGainB -= Math.round(cumFn(tNew, aB) - cumFn(tNew - lbMs, aB));
-    }
+    const _aA = auditChans && auditChans[0] && auditChans[0].ch, _aB = auditChans && auditChans[1] && auditChans[1].ch;
+    const _cumFn = appMode === 'real' ? chartCumAudit : getCumAudit;
+    // Audit-stripped gain over the lookback ending at t.
+    const _gainAtRaw = (t) => {
+      const g1 = cfg.valAt(t), g0 = cfg.valAt(t - lbMs);
+      if (!g1 || !g0) return null;
+      let a = g1.a - g0.a, b = g1.b - g0.b;
+      if (_aA) a -= _cumFn(t, _aA) - _cumFn(t - lbMs, _aA);
+      if (_aB) b -= _cumFn(t, _aB) - _cumFn(t - lbMs, _aB);
+      return { a, b };
+    };
+    // Smooth playback: subtract audits at whole seconds, then blend - blending first
+    // pairs a half-blended count with the full audit step and leaves a notch.
+    const _gainAt = !rdLerp ? _gainAtRaw : (t) => {
+      const t0 = Math.floor(t / 1000) * 1000, g0 = _gainAtRaw(t0);
+      if (!g0 || t === t0) return g0;
+      const g1 = _gainAtRaw(t0 + 1000);
+      if (!g1) return g0;
+      const f = (t - t0) / 1000;
+      return { a: lerp(g0.a, g1.a, f), b: lerp(g0.b, g1.b, f) };
+    };
+    const _gNowStripped = cfg.valAt ? _gainAt(tNew) : null;
+    let _exGainA = _gNowStripped ? Math.round(_gNowStripped.a) : null;
+    let _exGainB = _gNowStripped ? Math.round(_gNowStripped.b) : null;
     if (dashGainPerMin && lbMins > 1) {
       _exGainA = _exGainA != null ? _exGainA / lbMins : null;
       _exGainB = _exGainB != null ? _exGainB / lbMins : null;
     }
     // 1min avg: exact end-dot = mean of the per-second 1min gains over the last 60s.
     if (avg1m && cfg.valAt) {
-      const aA = auditChans && auditChans[0] && auditChans[0].ch, aB = auditChans && auditChans[1] && auditChans[1].ch;
-      const cumFn = appMode === 'real' ? chartCumAudit : getCumAudit;
       let sA = 0, sB = 0, n = 0;
       for (let k = 0; k < 60; k++) {
-        const t = tNew - k * 1000, g1 = cfg.valAt(t), g0 = cfg.valAt(t - lbMs);
-        if (!g1 || !g0) continue;
-        let gA = g1.a - g0.a, gB = g1.b - g0.b;
-        if (aA) gA -= cumFn(t, aA) - cumFn(t - lbMs, aA);
-        if (aB) gB -= cumFn(t, aB) - cumFn(t - lbMs, aB);
-        sA += gA; sB += gB; n++;
+        const g = _gainAt(tNew - k * 1000);
+        if (!g) continue;
+        sA += g.a; sB += g.b; n++;
       }
       if (n) { _exGainA = sA / n; _exGainB = sB / n; }
     }
@@ -7822,13 +7967,15 @@ export default function SocialBladeLive() {
     const tWin = tAx - span * HOUR_MS;
     const tMin = Math.min(tAx, Math.max(tWin, cfg.dataStart + histMs));
     // While the window is still filling, run the line up to the live value.
-    const gdLive = (tWin < tMin && _exGainA != null && _exGainB != null)
+    // Smooth (1m / Dynamic) playback does the same every frame: the data ends on a
+    // quantized bucket edge, so without a live point the end dot steps per bucket.
+    const gdLive = ((tWin < tMin || (rdLerp && tNew >= tAx)) && _exGainA != null && _exGainB != null)
       ? [...gd.filter(d => d.t < tNew), { t: tNew, [cfg.lineA.key]: _exGainA, [cfg.lineB.key]: _exGainB }]
       : gd;
     const insufficient = !!realDataReady && gdLive.filter(d => d.t >= tMin && d.t <= tNew && (d[cfg.lineA.key] != null || d[cfg.lineB.key] != null)).length < 2;
     const auditLines = (auditChans && lb <= 1)
       ? (appMode === 'real'
-          ? (exChartsOn ? EX_AUDITS_MAJOR : REAL_AUDITS_MAJOR).filter(a => a.ms >= tMin && a.ms <= tAx && auditChans.some(m => m.ch === a.channel))
+          ? (exChartsOn ? EX_AUDITS_SHOWN : REAL_AUDITS_SHOWN).filter(a => a.ms >= tMin && a.ms <= tAx && auditChans.some(m => m.ch === a.channel))
           : AUDITS.filter(a => a[3] >= tMin && a[3] <= tAx && auditChans.some(m => m.ch === a[1])))
       : [];
     const xDom = [tMin, tAx];
@@ -7910,6 +8057,10 @@ export default function SocialBladeLive() {
         ...gd.filter(d => d.t > tMin && d.t < tNew),
         ...(v1 && tNew > tMin ? [{ t: tNew, gap: v1.a - v1.b }] : []),
       ];
+    } else if (rdLerp && cfg.valAt && tNew >= tAx) {
+      // Smooth playback: live end point so the line + end dot reach the axis edge every frame.
+      const v1 = cfg.valAt(tNew);
+      if (v1) gd = [...gd.filter(d => d.t < tNew), { t: tNew, gap: v1.a - v1.b }];
     }
     const xDom = [tMin, tAx];
     const domT = dashGetRange(gd, ["gap"], tAx, tMin);
@@ -8024,7 +8175,7 @@ export default function SocialBladeLive() {
                   <span style={{fontSize:24,visibility:leadingIsA?"visible":"hidden"}}>👑</span>
                 </div>
               </div>
-              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="pdp" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
+              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="pdp" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
             </div>
             <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
               {dashRenderCounter(chanA.display)}
@@ -8061,7 +8212,7 @@ export default function SocialBladeLive() {
                   <span style={{fontSize:24,visibility:leadingIsA?"hidden":"visible"}}>👑</span>
                 </div>
               </div>
-              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="ts" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
+              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="ts" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
             </div>
             <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
               {dashRenderCounter(chanB.display)}
@@ -8158,7 +8309,7 @@ export default function SocialBladeLive() {
                     <div style={{fontSize:28,fontWeight:700,color:chanA.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanA.name}</div>
                     <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"visible":"hidden",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
                   </div>
-                  <div style={{width:150,marginTop:3}}><DashSpark ch="pdp" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
+                  <div style={{width:150,marginTop:3}}><DashSpark ch="pdp" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
                 </div>
                 {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
                   {[0,1,2].map(i=>(
@@ -8167,6 +8318,7 @@ export default function SocialBladeLive() {
                       <span style={{color:chanA.rates[i]!=null?(chanA.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanA.rates[i]==null?"--":isRTMode?<CasinoCounter value={chanA.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={chanA.rates[i]} signed/>}</span>
                     </div>
                   ))}
+                  {dashAuditRow(chanA.lastAudit)}
                 </div>}
               </div>
               <div className="sub-count" style={{fontSize:56,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,textAlign:"center",textShadow:"1px 1px 3px rgba(0,0,0,0.5)",width:"100%",overflow:"hidden"}}>
@@ -8183,7 +8335,7 @@ export default function SocialBladeLive() {
                     <div style={{fontSize:28,fontWeight:700,color:chanB.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanB.name}</div>
                     <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"hidden":"visible",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
                   </div>
-                  <div style={{width:150,marginTop:3}}><DashSpark ch="ts" curTime={curTime} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
+                  <div style={{width:150,marginTop:3}}><DashSpark ch="ts" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
                 </div>
                 {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
                   {[0,1,2].map(i=>(
@@ -8192,6 +8344,7 @@ export default function SocialBladeLive() {
                       <span style={{color:chanB.rates[i]!=null?(chanB.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanB.rates[i]==null?"--":isRTMode?<CasinoCounter value={chanB.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={chanB.rates[i]} signed/>}</span>
                     </div>
                   ))}
+                  {dashAuditRow(chanB.lastAudit)}
                 </div>}
               </div>
               <div className="sub-count" style={{fontSize:56,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,textAlign:"center",textShadow:"1px 1px 3px rgba(0,0,0,0.5)",width:"100%",overflow:"hidden"}}>
@@ -8298,7 +8451,7 @@ export default function SocialBladeLive() {
     const both = pdpEx > 0 && tsEx > 0, tot = both ? pdpEx + tsEx : 0;
     return (
       <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:big?3:2}}>
-        <div style={{fontSize:lbl,color:eDC.DIM,fontWeight:600,marginBottom:1}}>Excess Subs vs OTL:</div>
+        <div style={{fontSize:lbl,color:eDC.DIM,fontWeight:600,marginBottom:1}}>Excess Subs vs Reality:</div>
         <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums"}}><span style={{color:eDC.PDP}}>PewDiePie: </span><span style={{color:eDC.TEXT,fontWeight:700}}>{val(pdpEx)}</span></div>
         <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums"}}><span style={{color:eDC.TS}}>T-Series: </span><span style={{color:eDC.TEXT,fontWeight:700}}>{val(tsEx)}</span></div>
         <div style={{fontSize:fs1,fontVariantNumeric:"tabular-nums",color:eDC.DIM}}>Diff: {both
@@ -8308,6 +8461,19 @@ export default function SocialBladeLive() {
     );
   };
 
+  // LAYOUT: Dashboard Alt-layout rate list - "Audit:" line set a little below 1 Min / 1 Hour /
+  // 1 Day (own flow, not their columns, slightly smaller): the channel's latest audit in the
+  // last 24h (getRdLastAudit) with its start time, "--" if none.
+  const dashAuditRow = (a) => (
+    <div style={{fontSize:11,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",marginTop:4}}>
+      <span style={{color:eDC.DIM}}>Audit: </span>
+      {a == null ? <span style={{color:eDC.DIM,fontWeight:700}}>--</span> : <>
+        <span style={{color:a.mag>=0?"#4caf50":"#f44336",fontWeight:700}}><CasinoStatic value={Math.round(a.mag)} signed/></span>
+        <span style={{color:eDC.DIM,fontSize:9}}> ({(() => { const d = new Date(a.ms + _getDisplayOffset(a.ms) * 3600000); return [d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()].map(n => String(n).padStart(2, "0")).join(":"); })()})</span>
+      </>}
+    </div>
+  );
+
   // LAYOUT: Dashboard Normal/Alt dispatcher - see LAYOUTS.md
   const renderDualDashboard = (props) => props.altLayout ? renderAltDashboard(props) : renderNormalDashboard(props);
 
@@ -8316,7 +8482,12 @@ export default function SocialBladeLive() {
   const _renderDashTotalChartsAt = (cfg, h, wrapStyle, which, curTime, anim) => {
     const totTMin = Math.max(curTime - dashWin * DAY_MS, cfg.dataStart);
     const _totKeys = dashChanFilter==='pdp'?[cfg.totalLineA.key]:dashChanFilter==='ts'?[cfg.totalLineB.key]:[cfg.totalLineA.key,cfg.totalLineB.key];
-    const totalData = cfg.totalData;
+    let totalData = cfg.totalData;
+    // Smooth (1m / Dynamic) playback: live end point at curTime (see gain/gap charts).
+    if (rdLerp && cfg.valAt && totalData?.length && totalData[totalData.length - 1].t < curTime) {
+      const v1 = cfg.valAt(curTime);
+      if (v1) totalData = [...totalData, { t: curTime, [cfg.totalLineA.key]: v1.a, [cfg.totalLineB.key]: v1.b, [cfg.totalGapKey]: v1.a - v1.b }];
+    }
     const totDomT = dashGetRange(totalData, _totKeys, curTime, totTMin);
     const totDom = anim.dom('tot', totDomT);
     const totTicks = _ticksIn(niceTicks(totDomT), totDom);
@@ -9302,10 +9473,12 @@ export default function SocialBladeLive() {
             barH,
             chanA:{ icon:pdpIcon, name:"PewDiePie", color:eDC.PDP, display:displayPt,
               rateLabels:["1 Min","1 Hour","1 Day"],
-              rates:[subsPerMinTable.pdp[0]!=null?Math.round(subsPerMinTable.pdp[0]):null, subsPerMinTable.pdp[2]!=null?Math.round(subsPerMinTable.pdp[2]*60):null, subsPerMinTable.pdp[4]!=null?Math.round(subsPerMinTable.pdp[4]*1440):null] },
+              rates:[subsPerMinTable.pdp[0]!=null?Math.round(subsPerMinTable.pdp[0]):null, subsPerMinTable.pdp[2]!=null?Math.round(subsPerMinTable.pdp[2]*60):null, subsPerMinTable.pdp[4]!=null?Math.round(subsPerMinTable.pdp[4]*1440):null],
+              lastAudit:getRdLastAudit(tableTime, 'pdp', DAY_MS) },
             chanB:{ icon:tsIcon, name:"T-Series", color:eDC.TS, display:displayTt,
               rateLabels:["1 Min","1 Hour","1 Day"],
-              rates:[subsPerMinTable.ts[0]!=null?Math.round(subsPerMinTable.ts[0]):null, subsPerMinTable.ts[2]!=null?Math.round(subsPerMinTable.ts[2]*60):null, subsPerMinTable.ts[4]!=null?Math.round(subsPerMinTable.ts[4]*1440):null] },
+              rates:[subsPerMinTable.ts[0]!=null?Math.round(subsPerMinTable.ts[0]):null, subsPerMinTable.ts[2]!=null?Math.round(subsPerMinTable.ts[2]*60):null, subsPerMinTable.ts[4]!=null?Math.round(subsPerMinTable.ts[4]*1440):null],
+              lastAudit:getRdLastAudit(tableTime, 'ts', DAY_MS) },
             gap:currentGap, leadingIsA:pdpLeading,
             diffLabel:"Subscriber Difference", aheadLabel:"Channel Ahead",
             aheadName:pdpLeading?"PewDiePie":"T-Series", leadDuration:fmtLeadDuration(dashLeadMs),
@@ -9368,7 +9541,7 @@ export default function SocialBladeLive() {
                   {pdpLeading && <span style={{ position:"absolute", left:"100%", top:"50%", transform:"translateY(-50%)", marginLeft:6, fontSize:28 }}>👑</span>}
                   <div style={{ fontSize:34, fontWeight:700, color:eDC.PDP, lineHeight:1.1 }}>PewDiePie</div>
                 </div>
-                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="pdp" curTime={curTime} stripAudits={effectiveFilterAudits} color={eDC.PDP}/></div>
+                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="pdp" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={eDC.PDP}/></div>
                 <div className="sub-count" style={{ fontSize:counterFontSize, fontWeight:800, fontVariantNumeric:"tabular-nums", color:eDC.TEXT, letterSpacing:0, lineHeight:1, marginTop:0 }}>
                   {dashRenderCounter(displayPt)}
                 </div>
@@ -9392,7 +9565,7 @@ export default function SocialBladeLive() {
                   <div style={{ fontSize:34, fontWeight:700, color:eDC.TS, lineHeight:1.1 }}>T-Series</div>
                   {!pdpLeading && <span style={{ position:"absolute", right:"100%", top:"50%", transform:"translateY(-50%)", marginRight:6, fontSize:28 }}>👑</span>}
                 </div>
-                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="ts" curTime={curTime} stripAudits={effectiveFilterAudits} color={eDC.TS}/></div>
+                <div style={{ width:"80%", maxWidth:300, margin:"4px 0" }}><DashSpark ch="ts" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={eDC.TS}/></div>
                 <div className="sub-count" style={{ fontSize:counterFontSize, fontWeight:800, fontVariantNumeric:"tabular-nums", color:eDC.TEXT, letterSpacing:0, lineHeight:1, marginTop:0 }}>
                   {dashRenderCounter(displayTt)}
                 </div>
