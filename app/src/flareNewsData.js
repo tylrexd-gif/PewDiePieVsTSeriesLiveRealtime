@@ -101,6 +101,7 @@ export const FLARE_PROMOTIONS = [
   { ms: Date.UTC(2018, 10,  2, 18,  0, 0), channel: 'pdp', by: 'VoiceOverPete' },    // Nov  2  2PM EDT
   { ms: Date.UTC(2018, 10,  6, 23,  0, 0), channel: 'pdp', by: 'FBE' },              // Nov  6  6PM EST
   { ms: Date.UTC(2018, 10, 11, 14,  0, 0), channel: 'pdp', by: 'Saiman Says' },      // Nov 11  9AM EST
+  { ms: Date.UTC(2018, 10, 19, 23,  0, 0), channel: 'pdp', by: 'CaptainSparklez' },  // Nov 19  6PM EST
   { ms: Date.UTC(2018, 10, 25, 17,  0, 0), channel: 'pdp', by: 'Leo Otaco' },        // Nov 25 12PM EST
   { ms: Date.UTC(2018, 10, 25, 22,  0, 0), channel: 'pdp', by: 'MrBeast' },          // Nov 25  5PM EST
   { ms: Date.UTC(2018, 10, 27,  0,  0, 0), channel: 'pdp', by: 'DramaAlert' },       // Nov 26  7PM EST
@@ -115,6 +116,8 @@ export const FLARE_PROMOTIONS = [
   { ms: Date.UTC(2018, 11, 10, 23,  0, 0), channel: 'pdp', by: 'Miniminter' },       // Dec 10  6PM EST
   { ms: Date.UTC(2018, 11, 11, 22,  0, 0), channel: 'pdp', by: 'TGFBro' },           // Dec 11  5PM EST
   { ms: Date.UTC(2018, 11, 16, 22,  0, 0), channel: 'pdp', by: 'MrBeast' },
+  { ms: Date.UTC(2018, 11, 17,  3,  0, 0), channel: 'pdp', by: 'ERB2' },             // Dec 16 10PM EST
+  { ms: Date.UTC(2018, 11, 17, 13,  0, 0), channel: 'pdp', by: 'FavijTV' },          // Dec 17  8AM EST
   { ms: Date.UTC(2018, 11, 18, 22,  0, 0), channel: 'pdp', by: 'JuegaGerman' },       
   { ms: Date.UTC(2018, 11, 19, 21,  0, 0), channel: 'pdp', by: 'QuackityHQ' },         
   { ms: Date.UTC(2019, 0, 20, 15,  0, 0), channel: 'pdp', by: 'Davie504' },           

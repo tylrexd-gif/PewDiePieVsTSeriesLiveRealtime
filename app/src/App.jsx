@@ -80,17 +80,23 @@ let FLARE_NEWS_ENTRIES, FLARE_PROMOTIONS, SBD_REAL, FTVD_REAL, REAL_AUDITS, REAL
 // For display (markers, labels, the Audit Time table): an audit spread over consecutive
 // seconds of one channel (+700, +268 a second later) is one audit at its first second with
 // the summed magnitude. Gain stripping keeps the per-second rows, which match the data.
+// minute_total: the TSV repeats its per-minute total on every row of that minute (12 rows
+// of +122 each carry 1463), so it counts once per minute; rows without one (exports) add
+// their own magnitude.
 function _groupAuditSeconds(list) {
   const out = [], open = {};
+  const minuteOf = (a) => Math.floor(a.ms / 60000);
   for (const a of list) {
     const g = open[a.channel];
     if (g && a.ms - g.lastMs <= 1000) {
       g.magnitude += a.magnitude;
-      g.minute_total = (g.minute_total ?? 0) + (a.minute_total ?? a.magnitude);
+      if (a.minute_total == null) g.minute_total += a.magnitude;
+      else if (!g.minutes.has(minuteOf(a))) { g.minutes.add(minuteOf(a)); g.minute_total += a.minute_total; }
       g.lastMs = a.ms;
       continue;
     }
-    const n = { ...a, minute_total: a.minute_total ?? a.magnitude, lastMs: a.ms };
+    const n = { ...a, minute_total: a.minute_total ?? a.magnitude, lastMs: a.ms,
+      minutes: new Set(a.minute_total != null ? [minuteOf(a)] : []) };
     open[a.channel] = n;
     out.push(n);
   }
@@ -110,7 +116,7 @@ _onAltScen(() => {
   // from the first whole second at/after it, so round up to that second - otherwise
   // Filter Audits strips the jump one second before it appears.
   const fromExport = (key, from) => _arr(key)
-    .map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta, minute_total: a.delta }))
+    .map(a => ({ ms: Math.ceil((a.ms + ALT_TZ_SHIFT_MS) / 1000) * 1000, channel: a.channel, type: 'audit', magnitude: a.delta }))
     .filter(a => a.ms >= from);
   REAL_AUDITS = DATA_100M ? [] : ALT_SCEN
     ? [..._arr('REAL_AUDITS').filter(a => a.ms < ALT_START_MS), ...fromExport('ALT_AUDITS', ALT_START_MS)].sort((x, y) => x.ms - y.ms)
@@ -370,7 +376,7 @@ _onAltScen(() => {
     .filter(a => a.ms >= EXT_START_MS)];
   EX_AUDITS_MAJOR = [
     ...REAL_AUDITS_MAJOR.filter(a => a.ms >= ALT_START_MS),
-    ...otl.filter(a => a.type === 'audit' && a.ms >= ALT_START_MS).map(a => ({ ...a, magnitude: -a.magnitude })),
+    ...otl.filter(a => a.type === 'audit' && a.ms >= ALT_START_MS).map(a => ({ ...a, magnitude: -a.magnitude, ...(a.minute_total != null ? { minute_total: -a.minute_total } : {}) })),
   ].sort((x, y) => x.ms - y.ms);
   EX_AUDITS_SHOWN = _groupAuditSeconds(EX_AUDITS_MAJOR);
   _exAuditPdp = EX_AUDITS_MAJOR.filter(a => a.channel === 'pdp');
@@ -9836,7 +9842,7 @@ export default function SocialBladeLive() {
                             <span style={{fontSize:9,color:inv?"#844":"#484",marginLeft:"auto"}}>{inv?"SKIP":"KEEP"}</span>
                           </div>
                           <div style={{color:"#999",fontSize:10,fontVariantNumeric:"tabular-nums"}}>{_fmtPatchMs(a.ms)}</div>
-                          <div style={{fontSize:9,color:"#3a3a4a"}}>magnitude {a.magnitude > 0 ? '+' : ''}{a.magnitude}  min_total {a.minute_total > 0 ? '+' : ''}{a.minute_total}</div>
+                          <div style={{fontSize:9,color:"#3a3a4a"}}>magnitude {a.magnitude > 0 ? '+' : ''}{a.magnitude}  min_total {(a.minute_total ?? a.magnitude) > 0 ? '+' : ''}{a.minute_total ?? a.magnitude}</div>
                         </div>
                         <button onClick={()=>toggleInvalidateAudit(a.ms, a.channel)}
                           style={{...bS,color:inv?"#7fdf9b":"#e05",borderColor:inv?"#2d6040":"#3a1520",fontSize:9,flexShrink:0}}>

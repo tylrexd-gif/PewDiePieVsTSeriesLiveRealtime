@@ -9,6 +9,9 @@ import { fileURLToPath } from 'url';
 export const PATCH_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data-patches');
 const REAL_SOURCE_PATCHES = [
   'every_second_counts_pvt.patch-2018-10-29-0041.pvd.gz',   // Oct 29 2018 00:41:00 - 02:01:00 EDT, both channels: rate fix (front-loaded growth spread evenly; scripts/equalize.mjs)
+  'every_second_counts_pvt.patch-2018-10-29-0435-pdp.pvd.gz',   // Oct 29 2018 04:35:42 - 04:36:15 EDT, PDP: papered over (scripts/paper.mjs)
+  'every_second_counts_pvt.patch-2018-11-20-1245-ts.pvd.gz',   // Nov 20 2018 12:45:48 - 12:46:03 EST, TS: audit spread at ~+122/s papered over, whole +1912 audit put in 12:45:48
+  'every_second_counts_pvt.patch-2018-11-20-1248-pdp.pvd.gz',   // Nov 20 2018 12:48:01 - 12:48:40 EST, PDP: raw counts restored (smoothing had spread the -359 audit at 12:48:09 over 40 s)
   'every_second_counts_pvt.patch-2018-11-28-1655-ts.pvd.gz',   // Nov 28 2018 16:55:26 - 17:07:16 EST, TS: stalled counter + catch-up jump papered over (scripts/paper.mjs)
   'every_second_counts_pvt.patch-2018-11-28-2326-ts.pvd.gz',   // Nov 28 2018 23:26:15 - 23:33:15 EST, TS: papered over (scripts/paper.mjs)
   'every_second_counts_pvt.patch-2018-11-29-0028.pvd.gz',   // Nov 29 2018 00:28:58 - 01:01:24 EST, split 00:32:28, both channels: rate fix (scripts/equalize.mjs)
