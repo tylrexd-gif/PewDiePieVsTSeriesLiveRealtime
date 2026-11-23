@@ -1997,19 +1997,12 @@ const ChartTween = ({ target, active, durMs, resetKey, render }) => {
   const tShown = (active && st.t0) ? st.tPrev + (target - st.tPrev) * k : target;
   return render(tShown, anim);
 };
-// Hidden lead for the short live charts: the axis ends ~3 samples before the newest
-// data, so the newest points (and the live end point that is replaced each update)
-// sit past the right edge. A monotone segment's shape depends on the points on both
-// sides of it, so every visible segment then already has its settled neighbours and
-// new data never reshapes what is on screen.
-const _hiddenLeadMs = (data, tNew) => {
-  if (!data || data.length < 5) return 0;
-  let n = data.length;
-  while (n > 0 && data[n - 1].t > tNew) n--;
-  if (n < 5) return 0;
-  const step = Math.max(data[n - 2].t - data[n - 3].t, data[n - 3].t - data[n - 4].t);
-  return step > 0 ? 3 * step : 0;
-};
+// Gain/gap chart data runs this many real (recorded) samples past playback time,
+// clipped off by the x-domain. A monotone segment's shape depends on the points on
+// both sides of it, so the segment crossing the right edge already has its settled
+// neighbours and new data never reshapes what is on screen - with the axis ending
+// exactly at playback time.
+const _ALT_FUTURE_STEPS = 4;
 // Ticks of the target range that fall inside the (animating) shown range.
 const _ticksIn = (ticks, dom) => ticks.filter(v => v >= dom[0] && v <= dom[1]);
 
@@ -7532,8 +7525,14 @@ export default function SocialBladeLive() {
       const v = _altPdpTsAt(t);
       if (v) pts.push({ t, pt: v.pt, tt: v.tt, g: v.pt - v.tt, gap: v.pt - v.tt });
     }
+    // Hidden points past the right edge (real recorded samples, see _ALT_FUTURE_STEPS).
+    for (let k = 0, t = Math.floor(tEnd / bucket.step) * bucket.step + bucket.step; k < _ALT_FUTURE_STEPS; k++, t += bucket.step) {
+      const v = _altPdpTsAt(t);
+      if (v) pts.push({ t, pt: v.pt, tt: v.tt, g: v.pt - v.tt, gap: v.pt - v.tt });
+    }
+    // End of the data: no future samples, so end on the exact last value instead.
     const vEnd = _altPdpTsAt(tEnd);
-    if (vEnd) pts.push({ t: tEnd, pt: vEnd.pt, tt: vEnd.tt, g: vEnd.pt - vEnd.tt, gap: vEnd.pt - vEnd.tt });
+    if (vEnd && (!pts.length || pts[pts.length - 1].t < tEnd)) pts.push({ t: tEnd, pt: vEnd.pt, tt: vEnd.tt, g: vEnd.pt - vEnd.tt, gap: vEnd.pt - vEnd.tt });
     return _altNormalizeGap(injectRdAuditBreakpoints(pts, exChartsOn));
   };
 
@@ -7593,8 +7592,14 @@ export default function SocialBladeLive() {
       const at = pts.findIndex(p => p.t >= tReady), p = pointAt(tReady);
       if (p && at >= 0 && pts[at].t !== tReady) pts.splice(at, 0, p);
     }
+    // Hidden points past the right edge (real recorded samples, see _ALT_FUTURE_STEPS).
+    for (let k = 0, t = Math.floor(tEnd / bucket.step) * bucket.step + bucket.step; k < _ALT_FUTURE_STEPS; k++, t += bucket.step) {
+      const p = pointAt(t);
+      if (p) pts.push(p);
+    }
+    // End of the data: no future samples, so end on the exact last value instead.
     const endPoint = pointAt(tEnd);
-    if (endPoint && (!pts.length || pts[pts.length - 1].t !== tEnd)) pts.push(endPoint);
+    if (endPoint && (!pts.length || pts[pts.length - 1].t < tEnd)) pts.push(endPoint);
     return injectRdAuditBreakpoints(pts, exChartsOn)
       .map(d => d.gp != null && d.gt != null ? d : pointAt(d.t))
       .filter(Boolean);
@@ -7893,7 +7898,11 @@ export default function SocialBladeLive() {
     const [lb, span] = gainCharts[effectiveCi];
     const lbMs = Math.round(lb * HOUR_MS);
     const lbMins = lb * 60;
-    const gd_raw = cfg.gainData[effectiveCi] ?? [];
+    const gd_all = cfg.gainData[effectiveCi] ?? [];
+    // Short live charts keep the future samples (see _ALT_FUTURE_STEPS); the rest end at
+    // playback time and get a live end point instead.
+    const useFut = isRTMode && span <= 1 && gd_all.length > 0 && gd_all[gd_all.length - 1].t > tNew;
+    const gd_raw = useFut ? gd_all : gd_all.filter(d => d.t <= tNew);
     // Per-min mode: divide gp/gt by the lookback length in minutes for subs/min display.
     // The 1min charts instead become "1min avg": each point is the mean of the 1min
     // gain over the trailing 60s (time-windowed, so it holds for any sample step).
@@ -7965,17 +7974,15 @@ export default function SocialBladeLive() {
     // Left bound: the first second this chart has a value for (the lookback, plus the
     // 60s average in 1min avg mode), or the normal window once that has filled.
     const histMs = lbMs + (avg1m ? 60000 : 0);
-    // Short windows end a few samples before the newest data (see _hiddenLeadMs).
-    const tAx = curTime - ((isRTMode && span <= 1) ? _hiddenLeadMs(gd, tNew) : 0);
+    const tAx = curTime;
     // End-dot value: what the line shows at the dot (not the exact live value) when the
-    // axis lags the data, and always on the per-second charts.
-    const lineLabel = tAx < curTime || span < 1/30;
+    // line runs on through future samples, and always on the per-second charts.
+    const lineLabel = useFut || span < 1/30;
     const tWin = tAx - span * HOUR_MS;
     const tMin = Math.min(tAx, Math.max(tWin, cfg.dataStart + histMs));
-    // While the window is still filling, run the line up to the live value.
-    // Smooth (1m / Dynamic) playback does the same every frame: the data ends on a
-    // quantized bucket edge, so without a live point the end dot steps per bucket.
-    const gdLive = ((tWin < tMin || (rdLerp && tNew >= tAx)) && _exGainA != null && _exGainB != null)
+    // No future samples: run the line up to the live value, so the end dot doesn't
+    // step per quantized bucket edge.
+    const gdLive = (!useFut && _exGainA != null && _exGainB != null)
       ? [...gd.filter(d => d.t < tNew), { t: tNew, [cfg.lineA.key]: _exGainA, [cfg.lineB.key]: _exGainB }]
       : gd;
     const insufficient = !!realDataReady && gdLive.filter(d => d.t >= tMin && d.t <= tNew && (d[cfg.lineA.key] != null || d[cfg.lineB.key] != null)).length < 2;
@@ -8051,8 +8058,11 @@ export default function SocialBladeLive() {
     const [lb, span] = gainCharts[ci];
     const lbMs = Math.round(lb * HOUR_MS);
     let gd = cfg.gainData[ci];
-    // Short windows end a few samples before the newest data (see _hiddenLeadMs).
-    const tAx = curTime - ((isRTMode && span <= 1) ? _hiddenLeadMs(gd, tNew) : 0);
+    // Short live charts keep the future samples (see _ALT_FUTURE_STEPS); the rest end at
+    // playback time and get a live end point instead.
+    const useFut = isRTMode && span <= 1 && gd.length > 0 && gd[gd.length - 1].t > tNew;
+    if (!useFut) gd = gd.filter(d => d.t <= tNew);
+    const tAx = curTime;
     const tMin = Math.max(tAx - span * HOUR_MS, cfg.dataStart);
     // Window still at the very start of the data: pin the line to the first second and
     // the live value, so it draws from second 1 rather than the first sample.
@@ -8063,8 +8073,8 @@ export default function SocialBladeLive() {
         ...gd.filter(d => d.t > tMin && d.t < tNew),
         ...(v1 && tNew > tMin ? [{ t: tNew, gap: v1.a - v1.b }] : []),
       ];
-    } else if (rdLerp && cfg.valAt && tNew >= tAx) {
-      // Smooth playback: live end point so the line + end dot reach the axis edge every frame.
+    } else if (!useFut && cfg.valAt) {
+      // No future samples: live end point so the line + end dot reach the axis edge every frame.
       const v1 = cfg.valAt(tNew);
       if (v1) gd = [...gd.filter(d => d.t < tNew), { t: tNew, gap: v1.a - v1.b }];
     }
@@ -8099,7 +8109,7 @@ export default function SocialBladeLive() {
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gd, tMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey="gap" stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.gapName} isAnimationActive={false}/>
-            {endDots(gd, tAx, [{key:'gap',color:'#e2e5eb',exact:tAx < curTime ? null : cfg.exactGap}])}
+            {endDots(gd, tAx, [{key:'gap',color:'#e2e5eb',exact:useFut ? null : cfg.exactGap}])}
           </LineChart>
         </ResponsiveContainer>
       </DashChartCard>
