@@ -151,9 +151,7 @@ export const PROMO_DISPLAY_START_MS = Date.UTC(2018, 10, 1, 0, 0, 0); // Nov 1 2
 
 // Channel promotion events.
 // channel: 'pdp' = PewDiePie, 'ts' = T-Series
-// If T-Series has no promotions in the last 2 days the block is hidden entirely.
-// If PewDiePie has none it says "PewDiePie has received no promotions lately" - unless
-// neither channel has had a promotion in the last 7 days, then nothing is shown.
+// A channel with no promotions in the last 2 days has no promotion text.
 export const FLARE_PROMOTIONS = [
   // ── PewDiePie ──────────────────────────────────────────────────────────────
   { ms: Date.UTC(2018,  9, 26, 21,  0, 0), channel: 'pdp', by: 'MrBeast' },          // Oct 26  5PM EDT

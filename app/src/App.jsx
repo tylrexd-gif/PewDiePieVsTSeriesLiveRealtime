@@ -3234,15 +3234,11 @@ const getNewsParts = (clockTime, passInfo) => {
     : [];
   const pdpBy = [...new Set(recentPromos.filter(e => e.channel === 'pdp').map(e => e.by))];
   const tsBy  = [...new Set(recentPromos.filter(e => e.channel === 'ts').map(e => e.by))];
-  // "No promotions lately" only while some channel was promoted in the last 7 days.
-  const anyWeekPromo = showPromos && FLARE_PROMOTIONS.some(e => e.ms <= clockTime && clockTime - e.ms <= 7 * 86400000);
 
   return [
     ...news.map(e => e.label ? e.label + " - " + e.text : e.text),
     ...(showPromos ? [
-      ...(pdpBy.length > 0
-        ? ["PewDiePie was recently promoted by " + _fmtNameList(pdpBy)]
-        : anyWeekPromo ? ["PewDiePie has received no promotions lately"] : []),
+      ...(pdpBy.length > 0 ? ["PewDiePie was recently promoted by " + _fmtNameList(pdpBy)] : []),
       ...(tsBy.length > 0 ? ["T-Series was recently promoted by " + _fmtNameList(tsBy)] : []),
     ] : []),
   ];
