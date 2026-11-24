@@ -978,6 +978,45 @@ function _computeGapCrossings(buf) {
   return out;
 }
 
+// Lowest PDP - TS gap from the start of the data through time t, and the first second it was
+// reached. Keeps every second that set a new low, so stepping back or reversing is a lookup
+// and only seconds not seen before are scanned.
+let _lowGap = null;
+function lowestGapAt(t) {
+  const buf = _realDataBuf;
+  if (!buf) return null;
+  const end = Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t - REAL_DATA_START_MS) / 1000));
+  if (end < 0) return null;
+  let c = _lowGap;
+  if (!c || c.buf !== buf) c = _lowGap = { buf, end: -1, gap: Infinity, lows: [] };
+  for (let i = c.end + 1; i <= end; i++) {
+    const g = buf[i * 2] - buf[i * 2 + 1];
+    if (g < c.gap) { c.gap = g; c.lows.push(i); }
+  }
+  if (end > c.end) c.end = end;
+  let lo = 0, hi = c.lows.length - 1;   // last new low at or before end
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (c.lows[mid] <= end) lo = mid; else hi = mid - 1;
+  }
+  const idx = c.lows[lo];
+  return { gap: buf[idx * 2] - buf[idx * 2 + 1], t: REAL_DATA_START_MS + idx * 1000 };
+}
+
+// Lowest PDP - TS gap between two times, and the first second it was reached.
+function lowestGapBetween(t0, t1) {
+  const buf = _realDataBuf;
+  if (!buf) return null;
+  const i0 = Math.max(0, Math.ceil((t0 - REAL_DATA_START_MS) / 1000));
+  const i1 = Math.min(REAL_DATA_PAIR_COUNT - 1, Math.floor((t1 - REAL_DATA_START_MS) / 1000));
+  let gap = Infinity, idx = -1;
+  for (let i = i0; i <= i1; i++) {
+    const g = buf[i * 2] - buf[i * 2 + 1];
+    if (g < gap) { gap = g; idx = i; }
+  }
+  return idx < 0 ? null : { gap, t: REAL_DATA_START_MS + idx * 1000 };
+}
+
 // Flare votes under AltScen (from ALT_START_MS): Scenario's day-by-day schedule -
 // computeDailyVoteIncrement from its Apr 1 anchor - rebuilt from the same inputs:
 // PDP/TS totals at Scenario's day boundaries (00:00 EDT) from the per-second data,
@@ -3176,7 +3215,9 @@ const _fmtNameList = arr =>
   arr.length === 1 ? arr[0] :
   arr.slice(0, -1).join(", ") + " and " + arr[arr.length - 1];
 
-const getFlareNewsMessage = (clockTime) => {
+// News and promotions at clockTime, shared by the Flare and SocialBlade feeds. Pass Information
+// entries (passInfo) are Flare only.
+const getNewsParts = (clockTime, passInfo) => {
   const DEFAULT_WINDOW_MS = 336 * 3600000; // 2 weeks
   const TWO_DAYS = 2 * 86400000;
 
@@ -3185,7 +3226,7 @@ const getFlareNewsMessage = (clockTime) => {
     const win = e.windowHours != null ? e.windowHours * 3600000 : DEFAULT_WINDOW_MS;
     return clockTime - e.ms <= win;
   });
-  const news = withinWindow;
+  const news = passInfo ? withinWindow : withinWindow.filter(e => !e.passInfo);
 
   const showPromos = clockTime >= PROMO_DISPLAY_START_MS;
   const recentPromos = showPromos
@@ -3196,9 +3237,7 @@ const getFlareNewsMessage = (clockTime) => {
   // "No promotions lately" only while some channel was promoted in the last 7 days.
   const anyWeekPromo = showPromos && FLARE_PROMOTIONS.some(e => e.ms <= clockTime && clockTime - e.ms <= 7 * 86400000);
 
-  const parts = [
-    "This is a replica of FlareTV's PewDiePie vs T-Series Live Sub Count stream, using subscriber data taken from livestreams of the battle at the time, every second.",
-    "This stream is powered by FlareTV and Youtube Realtime by Akshat Mittal",
+  return [
     ...news.map(e => e.label ? e.label + " - " + e.text : e.text),
     ...(showPromos ? [
       ...(pdpBy.length > 0
@@ -3207,12 +3246,33 @@ const getFlareNewsMessage = (clockTime) => {
       ...(tsBy.length > 0 ? ["T-Series was recently promoted by " + _fmtNameList(tsBy)] : []),
     ] : []),
   ];
+};
+
+const getFlareNewsMessage = (clockTime) => {
+  const parts = [
+    "This is a replica of FlareTV's PewDiePie vs T-Series Live Sub Count stream, using subscriber data taken from livestreams of the battle at the time, every second.",
+    "This stream is powered by FlareTV and Youtube Realtime by Akshat Mittal",
+    ...getNewsParts(clockTime, true),
+  ];
   const msg = parts.join(" - ");
   return clockTime < Date.UTC(2019, 2, 12, 0, 0, 0) ? msg.toUpperCase() : msg;
 };
 
+// SocialBlade feed: the news alone, repeated if too short to fill the bar. "" when there is none.
+const getSBNewsMessage = (clockTime) => {
+  const msg = getNewsParts(clockTime, false).join(" - ");
+  return msg && Array(Math.ceil(120 / msg.length)).fill(msg).join(" - ");
+};
+// Strip below the three time zones, as wide as they are (ends at the SB logo).
+const SB_TICKER = {
+  box: { left:0, right:"auto", width:475, top:703, height:17, zIndex:10 },
+  text: { fontFamily:"Arial, sans-serif", fontWeight:400, fontSize:13 },
+  stretch: 1,
+  speed: 18,   // px/s at 1x (Flare: 52)
+};
+
 // LAYOUT: Flare - see LAYOUTS.md
-const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1, playing = true, newsFeed = true, nudge = null }) => {
+const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1, playing = true, newsFeed = true, nudge = null, sb = null }) => {
   // Natural (unscaled) width of a single message copy. Measured once
   // after mount and again whenever the message string changes.
   const [textW, setTextW] = useState(0);
@@ -3222,7 +3282,7 @@ const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1
   const multRef = useRef(1);
   multRef.current = mult > 0 ? mult : 1;
 
-  const message = newsFeed ? getFlareNewsMessage(clockTime) : getFlareTickerMessage();
+  const message = sb ? getSBNewsMessage(clockTime) : newsFeed ? getFlareNewsMessage(clockTime) : getFlareTickerMessage();
 
   useLayoutEffect(() => {
     if (!innerRef.current) return;
@@ -3231,9 +3291,9 @@ const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1
   }, [message, textW]);
 
   // 12% horizontal glyph stretch - height unchanged.
-  const STRETCH_X = 1.12;
+  const STRETCH_X = sb ? sb.stretch : 1.12;
   // Scroll speed in visual px/s at 1x; scaled by the playback multiplier.
-  const SPEED_PX_S = 52;
+  const SPEED_PX_S = sb ? sb.speed : 52;
   // Copy #2 starts one stretched copy to the right, so wrapping the offset at
   // loopW lands it exactly where copy #1 was - seamless.
   const loopW = textW * STRETCH_X;
@@ -3283,7 +3343,8 @@ const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1
       pointerEvents: "none",
       // Hide until we've measured, so the static unstretched text
       // never flashes before the animation starts.
-      visibility: textW > 0 ? "visible" : "hidden",
+      visibility: textW > 0 && message ? "visible" : "hidden",
+      ...sb?.box,
     }}>
       <div
         ref={stripRef}
@@ -3298,6 +3359,7 @@ const FlareNewsTicker = React.memo(({ clockTime, textColor, robotoFont, mult = 1
           fontSize: "13pt",
           color: textColor,
           lineHeight: 1,
+          ...sb?.text,
         }}
       >
         <span ref={innerRef} style={{ display: "inline-block" }}>
@@ -5683,6 +5745,60 @@ const overtakeInMs = (gap, pdpRate, tsRate) => {
   return ms <= OVERTAKE_MAX_MS ? ms : null;
 };
 
+// - SETTINGS PANEL -
+// A native popover (top layer, Esc and click-outside close it). Where anchor positioning is
+// missing it sits at the top right instead of under its button.
+const CFG_CSS = `
+.cfg-open { background:#1a2535; color:#9bbfdf; border:1px solid #2d4060; border-radius:5px; padding:5px 12px; font:inherit; font-size:13px; cursor:pointer; }
+.cfg-panel { position:fixed; inset:90px 14px auto auto; margin:0; box-sizing:border-box; width:min(370px, calc(100vw - 28px)); max-height:calc(100dvh - 110px); overflow-y:auto; overscroll-behavior:contain;
+  padding:14px 16px; background:#0e1018; color:#d5d9e2; border:1px solid #2d4060; border-radius:10px; box-shadow:0 12px 40px rgb(0 0 0 / .6);
+  font-size:13px; line-height:1.35; white-space:normal; color-scheme:dark; accent-color:#5b9be0;
+  opacity:0; translate:0 -6px; transition:opacity .15s, translate .15s, display .15s allow-discrete, overlay .15s allow-discrete; }
+.cfg-panel:popover-open { opacity:1; translate:0 0; }
+@starting-style { .cfg-panel:popover-open { opacity:0; translate:0 -6px; } }
+@media (prefers-reduced-motion: reduce) { .cfg-panel { translate:none; transition-duration:.01s; } @starting-style { .cfg-panel:popover-open { translate:none; } } }
+@supports (position-area: block-end span-inline-start) {
+  .cfg-panel { inset:auto; margin-block:8px; max-height:min(80dvh, 640px); position-area:block-end span-inline-start; position-try-fallbacks:flip-inline, flip-block; }
+}
+.cfg-head { display:flex; justify-content:space-between; align-items:center; font-size:15px; font-weight:600; color:#fff; }
+.cfg-close { background:none; border:0; color:#aab2c2; font:inherit; min-width:28px; min-height:28px; border-radius:6px; cursor:pointer; }
+.cfg-close:hover { background:#1a2535; color:#fff; }
+.cfg-group { border:0; margin:12px 0 0; padding:0; min-width:0; }
+.cfg-group legend { padding:0 0 2px; font-size:11px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:#8fa3bd; }
+.cfg-row { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:7px 0; border-top:1px solid #1d2230; }
+label.cfg-row:has(.cfg-switch:enabled) { cursor:pointer; }
+.cfg-row:has(:disabled) { opacity:.45; }
+.cfg-row small { display:block; font-size:11.5px; color:#97a0b0; }
+.cfg-ctl { display:flex; align-items:center; gap:6px; flex:none; }
+.cfg-row input[type=number] { width:60px; background:#0a0c14; color:#d5d9e2; border:1px solid #39445a; border-radius:5px; padding:4px 6px; font:inherit; }
+.cfg-row input[type=range] { width:100px; }
+.cfg-row output { min-width:30px; text-align:right; font-variant-numeric:tabular-nums; }
+.cfg-switch { appearance:none; position:relative; margin:0; width:36px; height:20px; border-radius:10px; background:#4b5366; cursor:inherit; transition:background .15s; }
+.cfg-switch::before { content:""; position:absolute; inset:2px auto auto 2px; width:16px; height:16px; border-radius:50%; background:#fff; transition:translate .15s; }
+.cfg-switch:checked { background:#3f83d6; }
+.cfg-switch:checked::before { translate:16px 0; }
+@media (forced-colors: active) { .cfg-switch { appearance:auto; } .cfg-switch::before { content:none; } }
+.cfg-choice { display:inline-flex; border:1px solid #39445a; border-radius:6px; overflow:hidden; }
+.cfg-choice label { position:relative; padding:4px 10px; cursor:pointer; color:#aab2c2; }
+.cfg-choice label + label { border-left:1px solid #39445a; }
+.cfg-choice label:has(:checked) { background:#1e3050; color:#9fcdff; font-weight:600; }
+.cfg-choice input { position:absolute; inset:0; margin:0; opacity:0; pointer-events:none; }
+.cfg-open:focus-visible, .cfg-panel :focus-visible, .cfg-choice label:has(:focus-visible) { outline:2px solid #9fcdff; outline-offset:-1px; }
+.cfg-panel .cfg-switch:focus-visible { outline-offset:2px; }
+`;
+const CfgGroup = ({ title, children }) => <fieldset className="cfg-group"><legend>{title}</legend>{children}</fieldset>;
+const CfgRow = ({ label, hint, children }) => (
+  <label className="cfg-row"><span>{label}{hint && <small>{hint}</small>}</span><span className="cfg-ctl">{children}</span></label>
+);
+const CfgSwitch = ({ label, hint, on, set, disabled = false }) => (
+  <CfgRow label={label} hint={hint}><input type="checkbox" role="switch" className="cfg-switch" checked={on} disabled={disabled} onChange={() => set(v => !v)}/></CfgRow>
+);
+const CfgChoice = ({ label, value, set, options }) => (
+  <div className="cfg-row" role="radiogroup" aria-label={label}><span>{label}</span><span className="cfg-choice">
+    {options.map(([v, text]) => <label key={v}><input type="radio" name={"cfg-" + label} checked={value === v} onChange={() => set(v)}/>{text}</label>)}
+  </span></div>
+);
+
 // - MAIN COMPONENT -
 export default function SocialBladeLive() {
   const appMode = 'real'; // alt-scenario mode removed
@@ -5780,6 +5896,17 @@ export default function SocialBladeLive() {
   // Desync and Snap are off in the Dashboard view; the stored values stay as set
   // (and still apply in the other views).
   const desyncEff = view === "dashboard" ? 0 : desync;
+  const [liveUrl, setLiveUrl] = useState(() => _urlHas('live'));
+  // Lowest flag: Live has its own value, on each time Live is entered; leaving Live returns to the saved one.
+  const [sbNewsFeed, setSbNewsFeed] = useState(() => _ss.sbNewsFeed ?? true);
+  useEffect(() => { _saveSS({ sbNewsFeed }); }, [sbNewsFeed]);
+  const [sbPassStats, setSbPassStats] = useState(() => _ss.sbPassStats ?? true);
+  useEffect(() => { _saveSS({ sbPassStats }); }, [sbPassStats]);
+  const [sbLowest, setSbLowest] = useState(() => _ss.sbLowest ?? false);
+  const [sbLowestLive, setSbLowestLive] = useState(true);
+  const showLowest = liveUrl ? sbLowestLive : sbLowest;
+  useEffect(() => { if (liveUrl) setSbLowestLive(true); }, [liveUrl]);
+  useEffect(() => { _saveSS({ sbLowest }); }, [sbLowest]);
   const minuteSnapEff = view === "dashboard" ? false : minuteSnap;
   const [dashWin, setDashWin] = useState(() => _ss.dashWin ?? 7);
   const [sbGapWin, setSbGapWin] = useState(() => KEEP_STATE_ON_LOAD ? (_ss.sbGapWin ?? 14) : 14); // STARTUP: always 14d
@@ -5873,7 +6000,7 @@ export default function SocialBladeLive() {
 
   // STARTUP: a load at /live (or the first visit) is forced to the same preset
   // regardless of saved state - SocialBlade, dark, Predict Overtake, 14d Sub Gap, Realtime at 1x,
-  // 2s counter interval, 0.69 desync, Snap on, at Now and playing. The view /
+  // 2s counter interval, 0.69 desync, Snap on (off at /live), at Now and playing. The view /
   // toggle / interval / position parts are set in their useState inits above.
   const didInit = useRef(false);
   useEffect(() => {
@@ -5893,7 +6020,7 @@ export default function SocialBladeLive() {
     dispatch({type:"SET_MODE", mode:"rt"});
     dispatch({type:"SET_MULT", mult:1});
     dispatch({type:"SET_DESYNC", value:0.69});
-    if (!initialPlayback.minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
+    if (!_urlHas('live') && !initialPlayback.minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
   }, []);
 
   // STARTUP goto: once loading has finished, jump to Now and start playing - so the
@@ -5958,13 +6085,13 @@ export default function SocialBladeLive() {
     if (prev === curr) return;
     if (!isRTMode) return;
     if (prev === "socialblade" && curr === "flare"
-        && desync === 0.7 && minuteSnap) {
+        && desync === 0.7 && (minuteSnap || liveUrl)) {
       dispatch({ type: "SET_DESYNC", value: 0 });
-      dispatch({ type: "TOGGLE_MINUTE_SNAP" });
+      if (minuteSnap) dispatch({ type: "TOGGLE_MINUTE_SNAP" });
     } else if (prev === "flare" && curr === "socialblade"
         && desync === 0 && !minuteSnap) {
       dispatch({ type: "SET_DESYNC", value: 0.7 });
-      dispatch({ type: "TOGGLE_MINUTE_SNAP" });
+      if (!liveUrl) dispatch({ type: "TOGGLE_MINUTE_SNAP" });
     }
   }, [view, isRTMode, desync, minuteSnap]);
 
@@ -5997,7 +6124,6 @@ export default function SocialBladeLive() {
   // Browser back/forward between /, /alt and /100m switches too.
   const posKeyRef = useRef(_posKey());
   const [altSwitching, setAltSwitching] = useState(false);   // the other mode's data is being built
-  const [liveUrl, setLiveUrl] = useState(() => _urlHas('live'));
   useEffect(() => {
     _onAltSwapped = () => {
       setRealDataReady(_realDataBuf ? _realDataVersion : 0);
@@ -6058,14 +6184,9 @@ export default function SocialBladeLive() {
     clearRT();
     dispatch({type:"BUMP_SEEK"});
     dispatch({type:"SET_MODE", mode:"rt"});
-    // Flare wants one coherent live clock; SB / Dashboard want desync + minute snap.
-    if (view === "flare") {
-      dispatch({type:"SET_DESYNC", value:0});
-      if (minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
-    } else {
-      dispatch({type:"SET_DESYNC", value:0.7});
-      if (!minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
-    }
+    // Flare wants one coherent live clock; SB / Dashboard want desync. Snap is off in Live.
+    dispatch({type:"SET_DESYNC", value: view === "flare" ? 0 : 0.7});
+    if (minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
     dispatch({type:"SET_MULT", mult:1});
     dispatch({type:"PLAY"});
   };
@@ -6513,6 +6634,7 @@ export default function SocialBladeLive() {
   useEffect(() => { console.log('%c[Keybinds] H = show/hide playback toolbar | Space = play/pause | Arrow keys = seek', 'color:#4a8fc0'); }, []);
   useEffect(() => {
     const handler = (e) => {
+      if (e.target.closest?.("[popover]")) return;   // Settings panel: native keys (Space toggles, Esc closes)
       if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") {
         if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); e.target.blur(); }
         return;
@@ -6680,16 +6802,21 @@ export default function SocialBladeLive() {
 
   // - Clock ticker: advances every wall-clock second by 1 data-second x mult -
   const [clockTime, setClockTime] = useState(curTime);
+  const clockPrev = useRef({ t: curTime, seek: seekToken });
   useEffect(() => {
+    const prev = clockPrev.current;
+    clockPrev.current = { t: curTime, seek: seekToken };
     // Non-RT: sync directly to curTime every render
     if (!isRTSpeedMode(speedMode) || !playing) { setClockTime(curTime); return; }
-    // RT: tick every wall-clock second
-    setClockTime(curTime);
+    // RT: tick every wall-clock second. A pan moves the clock by the pan itself, keeping the
+    // seconds already counted since the last counter tick.
+    if (seekToken !== prev.seek) setClockTime(c => c + (curTime - prev.t));
+    else setClockTime(curTime);
     const iv = setInterval(() => {
       setClockTime(prev => prev + (reverse ? -1000 : 1000) * effectiveMultRef.current);
     }, 1000);
     return () => clearInterval(iv);
-  }, [speedMode, playing, reverse, mult, curTime]);
+  }, [speedMode, playing, reverse, mult, curTime, seekToken]);
 
   // - Display values -
   // RT modes get values from the rtDisplay state (set by the RT tick).
@@ -6922,6 +7049,36 @@ export default function SocialBladeLive() {
     if (g == null) return "Sub Gap: \u2014";
     if (g >= 0) return `Sub Gap: PewDiePie: +${Math.abs(g).toLocaleString()}`;
     return `Sub Gap: T-Series: +${Math.abs(g).toLocaleString()}`;
+  })();
+
+  const viewName = view === "dashboard" ? "Dashboard" : view === "flare" ? "Flare" : "SocialBlade";
+  const desyncRow = isRTMode && <CfgRow label="Counters Desync Shift" hint="Offsets the T-Series counter updates from PewDiePie">
+    <input type="range" min={0} max={1} step={0.01} value={desync} onChange={e=>dispatch({type:"SET_DESYNC",value:parseFloat(e.target.value)})}/>
+    <output>{desync.toFixed(2)}</output>
+  </CfgRow>;
+
+  // Lowest flag: lowest gap so far, on the Sub Gap text's clock, in the selected display time
+  // zone, and the lowest of the current day unless that is the same moment.
+  const lowestGapLines = (() => {
+    if (!showLowest || view !== "socialblade" || showSBv2 || !realDataReady) return [];
+    const now = (isRTMode && rtDisplay.midT != null) ? rtDisplay.midT : curTime;
+    const line = (name, low, withDay) => {
+      if (now - low.t <= 60000) return `${name}: Happening now`;
+      const d = new Date(low.t + _getDisplayOffset(low.t) * HOUR_MS);
+      const day = d.getUTCDate(), h = d.getUTCHours();
+      const suf = day >= 11 && day <= 13 ? "th" : (["th","st","nd","rd"][day % 10] ?? "th");
+      const date = withDay ? `${d.toLocaleDateString("en-US", { timeZone:"UTC", month:"long" })} ${day}${suf}, ` : "";
+      const p = (v) => String(v).padStart(2, "0");
+      return `${name}: ${low.gap.toLocaleString()} (${date}${h % 12 || 12}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}${h < 12 ? "am" : "pm"} ${_dispTzLabel(low.t)})`;
+    };
+    const low = lowestGapAt(now);
+    if (!low) return [];
+    const lines = [line("Lowest", low, true)];
+    const midnight = Math.floor((now + _getDisplayOffset(now) * HOUR_MS) / DAY_MS) * DAY_MS;   // local, as if UTC
+    const dayStart = midnight - _getDisplayOffset(midnight - _getDisplayOffset(now) * HOUR_MS) * HOUR_MS;
+    const today = lowestGapBetween(dayStart, now);
+    if (today && today.t !== low.t) lines.push(line("Lowest Today", today, false));
+    return lines;
   })();
 
   // Re-measure when the label grows, when the SB view mounts the span, and after web fonts load.
@@ -7202,7 +7359,7 @@ export default function SocialBladeLive() {
   // and just push the organic endpoint. Only hours where the organic
   // gap either changes sign across the boundary or sits within
   // NOISE_MARGIN of zero get the full noise scan.
-  const crossingsNeeded = (view === "flare" && flareExtraInfo) || view === "dashboard";
+  const crossingsNeeded = (view === "flare" && flareExtraInfo) || view === "dashboard" || (view === "socialblade" && sbPassStats);
   const [gapCrossings, setGapCrossings] = useState([]);
   useEffect(() => {
     if (!crossingsNeeded) return; // keep last result - avoids clearing on flare view switch
@@ -7210,43 +7367,52 @@ export default function SocialBladeLive() {
   }, [crossingsNeeded, realDataReady]);
 
   const tsTotalSecsAhead = useMemo(() => {
-    if (curTime == null || gapCrossings.length === 0) return 0;
+    if (clockTime == null || gapCrossings.length === 0) return 0;
     // gapCrossings alternates: [0]=PDP->TS, [1]=TS->PDP, [2]=PDP->TS, ...
     // TS is ahead during even-indexed intervals: [c[0],c[1]], [c[2],c[3]], ...
     let total = 0;
     for (let i = 0; i < gapCrossings.length; i += 2) {
       const start = gapCrossings[i];
-      if (start >= curTime) break;
+      if (start >= clockTime) break;
       const end = gapCrossings[i + 1];
-      const effectiveEnd = (end != null && end < curTime) ? end : curTime;
+      const effectiveEnd = (end != null && end < clockTime) ? end : clockTime;
       total += (effectiveEnd - start) / 1000;
-      if (end == null || end >= curTime) break;
+      if (end == null || end >= clockTime) break;
     }
     return total;
-  }, [curTime, gapCrossings]);
+  }, [clockTime, gapCrossings]);
 
   const tsTakeoverCount = useMemo(() => {
-    if (curTime == null || gapCrossings.length === 0) return 0;
+    if (clockTime == null || gapCrossings.length === 0) return 0;
     let count = 0;
     for (let i = 0; i < gapCrossings.length; i += 2) {
-      if (gapCrossings[i] <= curTime) count++;
+      if (gapCrossings[i] <= clockTime) count++;
       else break;
     }
     return count;
-  }, [curTime, gapCrossings]);
+  }, [clockTime, gapCrossings]);
 
   // Legit takeover count: only TS leads that lasted >= 10 seconds count.
   const tsTakeoverCountLegit = useMemo(() => {
-    if (curTime == null || gapCrossings.length === 0) return 0;
+    if (clockTime == null || gapCrossings.length === 0) return 0;
     let count = 0;
     for (let i = 0; i < gapCrossings.length; i += 2) {
       const start = gapCrossings[i];
-      if (start > curTime) break;
-      const end = gapCrossings[i + 1] != null ? Math.min(gapCrossings[i + 1], curTime) : curTime;
+      if (start > clockTime) break;
+      const end = gapCrossings[i + 1] != null ? Math.min(gapCrossings[i + 1], clockTime) : clockTime;
       if (end - start >= 10000) count++;
     }
     return count;
-  }, [curTime, gapCrossings]);
+  }, [clockTime, gapCrossings]);
+
+  // Pass stats (SocialBlade, above the Lowest text); empty until T-Series has passed.
+  const sbPassStatsLines = (() => {
+    if (!sbPassStats || view !== "socialblade" || showSBv2 || tsTakeoverCountLegit < 1) return [];
+    const t = Math.floor(tsTotalSecsAhead);
+    const d = Math.floor(t / 86400), h = Math.floor(t % 86400 / 3600), m = Math.floor(t % 3600 / 60), sec = t % 60;
+    const dur = d > 0 ? `${d}d ${h}h ${m}m ${sec}s` : h > 0 ? `${h}h ${m}m ${sec}s` : `${m}m ${sec}s`;
+    return [`Number of Overtakes: ${tsTakeoverCountLegit}`, `Total Time T-Series Ahead: ${dur}`];
+  })();
 
   // CHANNEL AHEAD duration: binary search the same precomputed crossings
   // array the Flare view uses. O(log N) per render, no scanning, no ref
@@ -8577,6 +8743,7 @@ export default function SocialBladeLive() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
       `}</style>
+      <style>{CFG_CSS}</style>
       {barHidden && <div style={{ position:"fixed", top:16, left:"50%", transform:`translate(-50%, ${barHintVisible ? 0 : -12}px)`, opacity:barHintVisible ? 1 : 0, transition:"opacity 0.2s, transform 0.2s", pointerEvents:"none", zIndex:10000, background:"rgba(14,16,24,0.95)", color:"#fff", border:"1px solid #2d4060", borderRadius:8, padding:"12px 24px", fontSize:20, fontWeight:600, boxShadow:"0 6px 24px rgba(0,0,0,0.6)", whiteSpace:"nowrap" }}>
         Press <span style={{ display:"inline-block", background:"#1a2535", color:"#7cb9f7", border:"1px solid #2d4060", borderRadius:4, padding:"0 8px", margin:"0 2px" }}>H</span> to show playback bar
       </div>}
@@ -8642,18 +8809,6 @@ export default function SocialBladeLive() {
             </div>
           </div>
 
-          {/* PHASE (RT modes only) */}
-          {isRTSpeedMode(speedMode) && view !== "dashboard" && <>
-            <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-            <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}} title="Phase-shift PT/TT counter updates; SB lands at midpoint">
-              <span style={{fontSize:12,color:"#888",letterSpacing:"0.04em"}}>Counters Desync Shift</span>
-              <div style={{display:"flex",alignItems:"center",gap:4}}>
-                <input type="range" min={0} max={1} step={0.01} value={desync} onChange={e=>dispatch({type:"SET_DESYNC",value:parseFloat(e.target.value)})} onMouseUp={e=>e.target.blur()} style={{width:70,accentColor:"#4a6080",cursor:"pointer"}}/>
-                <span style={{fontSize:12,color:"#888",fontVariantNumeric:"tabular-nums",minWidth:28,textAlign:"right"}}>{desync.toFixed(2)}</span>
-              </div>
-            </div>
-          </>}
-
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
           {/* SEEK */}
@@ -8706,46 +8861,61 @@ export default function SocialBladeLive() {
               style={{ background:DATA_100M?"#2f2510":ALT_SCEN?"#2a1a35":"transparent", color:DATA_100M?"#e3b85c":ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(DATA_100M?"#5c4a1e":ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN||DATA_100M?600:400, opacity:altSwitching?0.6:1 }}>{altSwitching ? "Switching…" : _DATA_MODE_LABEL[DATA_MODE]}</button>
           </div>
 
-          {/* OPTIONS (view-specific) */}
-          {(view==="dashboard" || view==="flare" || view==="socialblade") && <>
-            <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-            <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
-              <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>{view==="dashboard"?"DASHBOARD":view==="flare"?"FLARE":"SOCIALBLADE"}</span>
-              <div style={{display:"flex",alignItems:"center",gap:5}}>
-                {view==="dashboard" && <button onClick={()=>setDashLayout(v=>(v+1)%3)} style={{ background:"#1a2535", color:"#9bbfdf", border:"1px solid #2d4060", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{dashLayout===0?"Default":dashLayout===1?"Default+":"Alt"}</button>}
-                {view==="dashboard" && <button onClick={()=>setDashGainPerMin(v=>!v)} title="Show gain charts as average subs per minute" style={{ background:dashGainPerMin?"#1a2535":"transparent", color:dashGainPerMin?"#9bbfdf":"#777", border:"1px solid "+(dashGainPerMin?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>/min</button>}
-                {view==="dashboard" && <button onClick={()=>setFilterAudits(v=>!v)} title="Strip audits from charts; mark audit timestamps" style={{ background:filterAudits?"#1a2535":"transparent", color:filterAudits?"#9bbfdf":"#777", border:"1px solid "+(filterAudits?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Filter Audits</button>}
-                {view==="dashboard" && <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
-                  {[['both','Both'],['pdp','PDP'],['ts','TS']].map(([v,lbl])=>(
-                    <button key={v} onClick={()=>setDashChanFilter(v)} style={{background:dashChanFilter===v?"#1a2535":"transparent",color:dashChanFilter===v?"#9bbfdf":"#777",border:"none",borderLeft:v==='both'?"none":"1px solid #1e1e1e",padding:"4px 10px",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:dashChanFilter===v?600:400}}>{lbl}</button>
-                  ))}
-                </div>}
-                {view==="dashboard" && ALT_SCEN && <button onClick={()=>setShowExcess(v=>!v)} title="Show the Alt Scenario's excess subscribers vs the OTL (real timeline): Alt count minus real count at the same second" style={{ background:showExcess?"#2a1a35":"transparent", color:showExcess?"#c99bf0":"#777", border:"1px solid "+(showExcess?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Show Excess</button>}
-                {view==="dashboard" && ALT_SCEN && <button onClick={()=>setChartsExcess(v=>!v)} title="Every chart (growth windows, totals, gaps) and the Explorer show the excess subs vs the OTL instead" style={{ background:chartsExcess?"#2a1a35":"transparent", color:chartsExcess?"#c99bf0":"#777", border:"1px solid "+(chartsExcess?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit", opacity:chartsExcess&&!exChartsOn?0.6:1 }}>{chartsExcess&&!exChartsOn?"Building…":"Charts Show Excess"}</button>}
-                {view==="dashboard" && <label title="Long Charts Window (days): Sub Gap, Total Subs and 24h Gain use this window; 12h Gain uses half, 48h Gain uses twice" style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:12,color:"#777",marginLeft:4}}>
-                  Long Window
-                  <input type="number" min={1} step={1} value={dashWin}
-                    onChange={e=>{ const v=Math.round(Number(e.target.value)); if (v>=1) setDashWin(v); }}
-                    style={{width:44,background:"#0a0c14",color:"#9bbfdf",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 4px",fontSize:12,fontFamily:"inherit"}}/>
-                  d
-                </label>}
-
-                {view==="flare" && <button onClick={()=>setFlareDark(v=>!v)} style={{ background:"transparent", color:"#999", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{flareDark?"Light Mode":"Dark Mode"}</button>}
-                {view==="flare" && <button onClick={()=>setFlareNewsFeed(v=>!v)} style={{ background:flareNewsFeed?"#1a2535":"transparent", color:flareNewsFeed?"#7cb9f7":"#777", border:"1px solid "+(flareNewsFeed?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>News Feed</button>}
-                {view==="socialblade" && <button onClick={()=>setSbDark(v=>!v)} style={{ background:"transparent", color:"#999", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{sbDark?"Light Mode":"Dark Mode"}</button>}
-                {view==="socialblade" && <button onClick={()=>setSbOvertake(v=>!v)} style={{ background:sbOvertake?"#1a2535":"transparent", color:sbOvertake?"#9bbfdf":"#777", border:"1px solid "+(sbOvertake?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Predict Overtake</button>}
-                {view==="socialblade" && <label title="Window (days) of the main Sub Gap chart. 0 = fixed reset points instead of a rolling window" style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:12,color:"#777",marginLeft:4}}>
-                  Sub Gap Window
-                  <input type="number" min={0} step={1} value={sbGapDraft ?? sbGapWin}
-                    onChange={e=>{ setSbGapDraft(e.target.value); const v=Math.round(Number(e.target.value)); if (e.target.value!==""&&v>=0) setSbGapWin(v); }}
-                    onBlur={()=>setSbGapDraft(null)}
-                    style={{width:44,background:"#0a0c14",color:"#9bbfdf",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 4px",fontSize:12,fontFamily:"inherit"}}/>
-                  d
-                </label>}
-                {view==="socialblade" && <button onClick={()=>dispatch({type:"TOGGLE_MINUTE_SNAP"})} title="Update tables once every minute - otherwise, updates every second" style={{ background:minuteSnap?"#1a2535":"transparent", color:minuteSnap?"#7cb9f7":"#777", border:"1px solid "+(minuteSnap?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Snap</button>}
+          {/* SETTINGS: everything specific to the current view, in a popover */}
+          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
+          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
+            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SETTINGS</span>
+            <button type="button" className="cfg-open" popovertarget="cfg-panel">⚙ {viewName}</button>
+            <div id="cfg-panel" className="cfg-panel" popover="auto" role="group" aria-label={viewName + " settings"}>
+              <div className="cfg-head">
+                <span>{viewName} settings</span>
+                <button type="button" className="cfg-close" popovertarget="cfg-panel" popovertargetaction="hide" aria-label="Close settings">✕</button>
               </div>
+              {view==="socialblade" && <>
+                <CfgGroup title="Display">
+                  <CfgSwitch label="Dark mode" on={sbDark} set={setSbDark}/>
+                  <CfgSwitch label="Predict Overtake" hint="When T-Series is estimated to pass" on={sbOvertake} set={setSbOvertake}/>
+                  {!showSBv2 && <CfgSwitch label="Lowest sub gap" hint="Lowest so far and when. On by default in Live" on={showLowest} set={liveUrl ? setSbLowestLive : setSbLowest}/>}
+                  {!showSBv2 && <CfgSwitch label="Pass stats" hint="Once T-Series has passed: overtakes (10s or more) and total time ahead" on={sbPassStats} set={setSbPassStats}/>}
+                  <CfgRow label="Sub Gap Window" hint="Days. 0 = fixed reset points">
+                    <input type="number" min={0} step={1} value={sbGapDraft ?? sbGapWin}
+                      onChange={e=>{ setSbGapDraft(e.target.value); const v=Math.round(Number(e.target.value)); if (e.target.value!==""&&v>=0) setSbGapWin(v); }}
+                      onBlur={()=>setSbGapDraft(null)}/>
+                  </CfgRow>
+                </CfgGroup>
+                {!showSBv2 && <CfgGroup title="News bar">
+                  <CfgSwitch label="News Feed" hint="Scrolling news and promotions" on={sbNewsFeed} set={setSbNewsFeed}/>
+                </CfgGroup>}
+                <CfgGroup title="Updates">
+                  <CfgSwitch label="Snap" hint="Tables update once a minute instead of with the counters" on={minuteSnap} set={()=>dispatch({type:"TOGGLE_MINUTE_SNAP"})}/>
+                  {desyncRow}
+                </CfgGroup>
+              </>}
+              {view==="flare" && <CfgGroup title="Display">
+                <CfgSwitch label="Dark mode" on={flareDark} set={setFlareDark}/>
+                <CfgSwitch label="News Feed" hint="Scrolling news and promotions" on={flareNewsFeed} set={setFlareNewsFeed}/>
+                {desyncRow}
+              </CfgGroup>}
+              {view==="dashboard" && <>
+                <CfgGroup title="Layout">
+                  <CfgChoice label="Layout" value={dashLayout} set={setDashLayout} options={[[0,"Default"],[1,"Default+"],[2,"Alt"]]}/>
+                  <CfgChoice label="Channels" value={dashChanFilter} set={setDashChanFilter} options={[["both","Both"],["pdp","PDP"],["ts","TS"]]}/>
+                </CfgGroup>
+                <CfgGroup title="Charts">
+                  <CfgSwitch label="Gains per minute" hint="Gain charts as average subs per minute" on={dashGainPerMin} set={setDashGainPerMin}/>
+                  <CfgSwitch label="Filter Audits" hint="Strip audits from charts and mark when they happened" on={filterAudits} set={setFilterAudits}/>
+                  <CfgRow label="Long Window" hint="Days, for Sub Gap, Total Subs and 24h Gain. 12h Gain uses half, 48h Gain twice">
+                    <input type="number" min={1} step={1} value={dashWin}
+                      onChange={e=>{ const v=Math.round(Number(e.target.value)); if (v>=1) setDashWin(v); }}/>
+                  </CfgRow>
+                </CfgGroup>
+                {ALT_SCEN && <CfgGroup title="Alt Scenario">
+                  <CfgSwitch label="Show Excess" hint="Alt count minus the real count at the same second" on={showExcess} set={setShowExcess}/>
+                  <CfgSwitch label="Charts Show Excess" hint={chartsExcess && !exChartsOn ? "Building…" : "Every chart and the Explorer show the excess"} on={chartsExcess} set={setChartsExcess}/>
+                </CfgGroup>}
+              </>}
             </div>
-          </>}
+          </div>
 
           <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
 
@@ -8985,6 +9155,11 @@ export default function SocialBladeLive() {
           <span ref={gapLabelRef} style={{ background:SB_BOTTOM_BG, color:sbDark?"#fff":"#000", lineHeight:1, fontSize:36, display:"inline-block", transformOrigin:"left center", transform:`scaleX(${gapLabelScale})` }}>{gapLabel}</span>
         </div>
 
+        {/* = Pass stats, Lowest and Today: one block growing upward from above the T-Series chart's axis = */}
+        <div style={{ position:"absolute", right:18, bottom:283, fontFamily:"Arial, sans-serif", fontSize:13.5, lineHeight:"17px", color:"#e00000", textAlign:"right", whiteSpace:"nowrap", zIndex:11, pointerEvents:"none" }}>
+          {[...sbPassStatsLines, ...lowestGapLines].map(l => <div key={l.split(":")[0]}>{l}</div>)}
+        </div>
+
         {/* = Historical Gap Chart = */}
         <div style={{ position:"absolute", left:698, top:501, width:572, height:241, overflow:"hidden", zIndex:10 }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -9121,6 +9296,9 @@ export default function SocialBladeLive() {
             </div>
           );
         })()}
+
+        {/* = News Feed = */}
+        {sbNewsFeed && <FlareNewsTicker clockTime={clockTime} textColor={sbDark?"#1aff8c":"#00893f"} robotoFont="" mult={mult} playing={playing} nudge={tickerNudge} sb={SB_TICKER}/>}
 
         {/* SB Header Logo */}
         <img src={sbLogo} style={{ position:"absolute", left:480, top:658, width:240, height:62.2 }} alt=""/>
