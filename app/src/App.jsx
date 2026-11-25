@@ -978,6 +978,15 @@ function _computeGapCrossings(buf) {
   return out;
 }
 
+// Whether T-Series was ahead for any second between t0 and t1.
+function tsAheadBetween(t0, t1) {
+  const c = _gapCrossings ?? [];
+  for (let i = 0; i < c.length && c[i] <= t1; i += 2) {
+    if (c[i + 1] == null || c[i + 1] > t0) return true;
+  }
+  return false;
+}
+
 // Lowest PDP - TS gap from the start of the data through time t, and the first second it was
 // reached. Keeps every second that set a new low, so stepping back or reversing is a lookup
 // and only seconds not seen before are scanned.
@@ -1002,6 +1011,9 @@ function lowestGapAt(t) {
   const idx = c.lows[lo];
   return { gap: buf[idx * 2] - buf[idx * 2 + 1], t: REAL_DATA_START_MS + idx * 1000 };
 }
+
+// Lowest Today shows only when more than this far under the gap at the start of the day.
+const LOWEST_TODAY_JITTER = 100;
 
 // Lowest PDP - TS gap between two times, and the first second it was reached.
 function lowestGapBetween(t0, t1) {
@@ -2043,7 +2055,6 @@ const ChartTween = ({ target, active, durMs, resetKey, render }) => {
 // exactly at playback time.
 const _ALT_FUTURE_STEPS = 4;
 // Ticks of the target range that fall inside the (animating) shown range.
-const _ticksIn = (ticks, dom) => ticks.filter(v => v >= dom[0] && v <= dom[1]);
 
 const initialPlayback = { playing:false, reverse:false, speedMode:"rt", mult:1, dyn:false, desync:0, seekToken:0, minuteSnap:false };
 
@@ -3215,18 +3226,18 @@ const _fmtNameList = arr =>
   arr.length === 1 ? arr[0] :
   arr.slice(0, -1).join(", ") + " and " + arr[arr.length - 1];
 
-// News and promotions at clockTime, shared by the Flare and SocialBlade feeds. Pass Information
-// entries (passInfo) are Flare only.
-const getNewsParts = (clockTime, passInfo) => {
+// News and promotions at clockTime, shared by the Flare and SocialBlade feeds. Pass
+// predictions (flareExpectedPass) are Flare only.
+const getNewsParts = (clockTime, expectedPass) => {
   const DEFAULT_WINDOW_MS = 336 * 3600000; // 2 weeks
   const TWO_DAYS = 2 * 86400000;
 
   const past = FLARE_NEWS_ENTRIES.filter(e => e.ms <= clockTime);
-  const withinWindow = past.filter(e => {
+  const news = past.filter(e => {
+    if (e.flareExpectedPass && !expectedPass) return false;
     const win = e.windowHours != null ? e.windowHours * 3600000 : DEFAULT_WINDOW_MS;
     return clockTime - e.ms <= win;
   });
-  const news = passInfo ? withinWindow : withinWindow.filter(e => !e.passInfo);
 
   const showPromos = clockTime >= PROMO_DISPLAY_START_MS;
   const recentPromos = showPromos
@@ -3254,11 +3265,11 @@ const getFlareNewsMessage = (clockTime) => {
   return clockTime < Date.UTC(2019, 2, 12, 0, 0, 0) ? msg.toUpperCase() : msg;
 };
 
-// SocialBlade feed: the news alone, repeated if too short to fill the bar. "" when there is none.
-const getSBNewsMessage = (clockTime) => {
-  const msg = getNewsParts(clockTime, false).join(" - ");
-  return msg && Array(Math.ceil(120 / msg.length)).fill(msg).join(" - ");
-};
+// SocialBlade feed: the credits, which always show (long enough alone to fill the bar), then the news.
+const getSBNewsMessage = (clockTime) => [
+  "This is a recreation of SocialBlade's PewDiePie vs. T-Series livestream from 2018-2019, made possible by TRAINALYTICS, BoL123, and TylerXD. Please show them your support.",
+  ...getNewsParts(clockTime, false),
+].join(" - ");
 // Strip below the three time zones, as wide as they are (ends at the SB logo).
 const SB_TICKER = {
   box: { left:0, right:"auto", width:475, top:703, height:17, zIndex:10 },
@@ -4416,22 +4427,6 @@ const DC = {
   BG:"#181b24", CARD:"#0f1117", BORDER:"#2a2d38", TEXT:"#c8cdd6", DIM:"#9ca3af",
 };
 
-const niceTicks = (domain, small) => {
-  const [lo,hi] = domain;
-  if (!isFinite(lo)||!isFinite(hi)) return [0];
-  const range = hi - lo;
-  if (range <= 0) return [0];
-  let step;
-  if (small) step = range<20?5:range<50?10:range<100?20:range<200?50:range<500?100:range<1000?200:range<2000?500:range<5000?1000:range<10000?2000:range<20000?5000:range<50000?10000:range<100000?20000:50000;
-  else step = range<200000?50000:range<500000?100000:range<1000000?200000:range<2000000?500000:range<5000000?1000000:1000000;
-  const ticks = [];
-  const start = Math.ceil(lo/step)*step;
-  for (let v=start;v<=hi;v+=step) ticks.push(v);
-  if (lo<=0&&hi>=0&&!ticks.includes(0)){ticks.push(0);ticks.sort((a,b)=>a-b);}
-  if (ticks.length===0) ticks.push(0);
-  return ticks;
-};
-
 // Snap a tight [lo, hi] domain outward to multiples of a 1/2/2.5/5 x 10^n step
 // (~5 intervals). Unlike recharts' 'auto' domain this returns concrete numbers,
 // so it can be run through useSmoothBounds for an eased step transition.
@@ -4549,6 +4544,100 @@ const _monoInterp = (data, tCur, key) => {
   return (2*f3-3*f2+1)*y1 + (f3-2*f2+f)*h*m1 + (-2*f3+3*f2)*y2 + (f3-f2)*h*m2;
 };
 
+// - DASHBOARD AXES -
+// One tick generator for every dashboard chart, drawn from the plot's real pixel size.
+// X: the smallest standard time step that leaves each label room, on round times of the display
+// time zone (a tick at midnight shows the date). Depends only on window length and plot width.
+// Y: 1/2/5 x 10^n steps about 45px apart, labelled with just the decimals the step needs.
+const DASH_T_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 345600, 604800, 1209600, 2419200];
+const DASH_MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const _dashTimeLabel = (t, kind) => {   // kind: "s" HH:MM:SS | "m" HH:MM | "d" Mon D
+  const d = new Date(t + _getDisplayOffset(t) * HOUR_MS), p = n => String(n).padStart(2, "0");
+  return kind === "d" ? DASH_MON[d.getUTCMonth()] + " " + d.getUTCDate()
+    : p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + (kind === "s" ? ":" + p(d.getUTCSeconds()) : "");
+};
+const dashTimeTicks = (t0, t1, pw) => {
+  const span = t1 - t0;
+  if (!(span > 0) || !(pw > 0)) return { ticks: [], kind: "m" };
+  const step = DASH_T_STEPS.find(s => s * 1000 / span * pw >= (s < 60 ? 70 : s < 86400 ? 50 : 46)) || DASH_T_STEPS[DASH_T_STEPS.length - 1];
+  const S = step * 1000, kind = step < 60 ? "s" : step < 86400 ? "m" : "d", ticks = [];
+  for (let k = Math.ceil((t0 - DAY_MS) / S); ; k++) {
+    const local = k * S;   // round in local time; offsets can change inside the window (DST)
+    let t = local - _getDisplayOffset(local) * HOUR_MS;
+    t = local - _getDisplayOffset(t) * HOUR_MS;
+    if (t > t1) break;
+    if (t < t0) continue;
+    const day = local % DAY_MS === 0;
+    ticks.push({ t, day, label: _dashTimeLabel(t, day ? "d" : kind) });
+  }
+  return { ticks, kind };
+};
+// Y step per chart. A step in use is kept until its spacing clearly leaves the readable range,
+// so a range hovering around a threshold can't make the axis flicker between two steps.
+const _dashYSteps = new Map();
+const dashValueTicks = (id, lo, hi, ph) => {
+  const range = hi - lo;
+  if (!(range > 0) || !(ph > 0)) return [];
+  const gapPx = Math.max(18, Math.min(42, ph / 4));
+  let step = _dashYSteps.get(id);
+  const px = step ? step / range * ph : 0;
+  if (!step || px < gapPx * 0.85 || px > gapPx * 2.9 || range / step < 2) {
+    const raw = range * gapPx / ph, mag = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / mag;
+    const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    // Never fewer than two intervals: drop to the next finer step if needed.
+    const finer = m === 10 ? 5 : m === 5 ? 2 : m === 2 ? 1 : 0.5;
+    step = Math.max(1, (range / (m * mag) < 2 ? finer : m) * mag);
+    _dashYSteps.set(id, step);
+  }
+  // Same units as the end-dot labels (fmtAuto): plain below 1,000, K from 1,000, M from 1,000,000.
+  const label = (v) => {
+    const m = Math.abs(v), pow = m >= 1e6 ? 6 : m >= 1e3 ? 3 : 0;
+    const dec = pow ? Math.max(0, pow - Math.floor(Math.log10(step) + 1e-9)) : 0;
+    return Number((v / 10 ** pow).toFixed(dec)) + (pow === 6 ? "M" : pow === 3 ? "K" : "");
+  };
+  const out = [];
+  for (let k = Math.ceil(lo / step); k * step <= hi; k++) out.push({ v: k * step, label: k === 0 ? "0" : label(k * step) });
+  return out;
+};
+const DASH_TICK_FONT = { fontSize: 10, fontFamily: "Inter,Roboto,system-ui,sans-serif", fontVariantNumeric: "tabular-nums" };
+// Windows of a day or less: just the exact start and end times, plus midnight where the day changes
+// (its label is dropped when too close to an end; its gridline stays). Longer ones: round dates.
+const dashAxes = (id, d) => (
+  <Customized key="axes" component={({ xAxisMap, yAxisMap }) => {
+    const xs = Object.values(xAxisMap)[0]?.scale, ys = Object.values(yAxisMap)[0]?.scale;
+    if (!xs || !ys) return null;
+    const [t0, t1] = xs.domain(), [x0, x1] = xs.range(), [lo, hi] = ys.domain(), [ya, yb] = ys.range();
+    const yt = Math.min(ya, yb), y1 = Math.max(ya, yb);
+    if (![t0, t1, x0, x1, lo, hi, yt, y1].every(isFinite)) return null;
+    const span = t1 - t0, pins = span <= DAY_MS + 1000 && span > 0;
+    const ticks = dashTimeTicks(t0, t1, x1 - x0).ticks.filter(k => !pins || k.day);
+    const pinKind = span <= HOUR_MS + 1000 ? "s" : "m";
+    const w = l => l.length * 5.9;
+    const a = pins ? _dashTimeLabel(t0, pinKind) : "", b = pins ? _dashTimeLabel(t1, pinKind) : "";
+    const snap = v => Math.round(v) + 0.5;
+    return (
+      <g style={{ pointerEvents: "none" }}>
+        {dashValueTicks(id, lo, hi, y1 - yt).map(k => { const y = ys(k.v); return (
+          <g key={"y" + k.v}>
+            <line x1={x0} x2={x1} y1={snap(y)} y2={snap(y)} stroke="#222736"/>
+            <text x={x0 - 6} y={y + 3.5} textAnchor="end" fill={d.DIM} style={DASH_TICK_FONT}>{k.label}</text>
+          </g>); })}
+        {ticks.map(k => {
+          const x = xs(k.t), hw = w(k.label) / 2;
+          const hide = pins && (x - hw < x0 + w(a) / 2 + 9 || x + hw > x1 - w(b) / 2 - 9);
+          return (
+            <g key={"x" + k.t}>
+              <line x1={snap(x)} x2={snap(x)} y1={yt} y2={y1} stroke={k.day ? "#30364a" : "#222736"}/>
+              {!hide && <text x={x} y={y1 + 15} textAnchor="middle" fill={d.DIM} style={DASH_TICK_FONT}>{k.label}</text>}
+            </g>);
+        })}
+        {pins && <text x={x0} y={y1 + 15} textAnchor="middle" fill={d.DIM} style={DASH_TICK_FONT}>{a}</text>}
+        {pins && <text x={x1} y={y1 + 15} textAnchor="middle" fill={d.DIM} style={DASH_TICK_FONT}>{b}</text>}
+      </g>
+    );
+  }}/>
+);
+
 const endDots = (data, tCur, specs) => {
   if (!data || !data.length) return null;
   // x anchor: clamp tCur to data range
@@ -4607,14 +4696,6 @@ const miniTogBtn = (active) => ({
   fontFamily: "inherit",
   lineHeight: "1.5",
 });
-// Thin midnight markers to <= max, stepping by whole days anchored to absolute day number
-// so the kept lines don't shift as the window slides.
-const thinMidnights = (mids, max = 8) => {
-  if (mids.length <= max) return mids;
-  const s = [2, 3, 7, 14, 28, 56, 112].find(s => mids.length / s <= max) || Math.ceil(mids.length / max);
-  return mids.filter(m => Math.floor(m / DAY_MS) % s === 0);
-};
-
 // Hover affordance for explorable cards: magnifier cursor over the whole card (recharts
 // forces cursor:default on its wrapper, hence !important) and an instant "Click to explore" pill.
 const _exploreCss = `
@@ -4626,6 +4707,94 @@ const _exploreCss = `
   background: rgba(30,33,48,0.92); border: 1px solid #3a4258; color: #c8cdd6; pointer-events: none;
   opacity: 0; transition: opacity 120ms ease; white-space: nowrap; }
 .dash-explore:hover .dash-explore-hint { opacity: 1; }
+
+/* Alt: the left column, sized from the page like Default; its sections share the full height. */
+.dash3 { container-type: size; }
+.dash3-side { --u: min(100cqw / 1600, 100cqh / 900); box-sizing: border-box; width: 33%; flex: none; overflow: hidden; border-right: 1px solid #2a2d38; padding: calc(12 * var(--u)) calc(18 * var(--u));
+  display: grid; grid-template: minmax(0, 268fr) minmax(0, 106fr) minmax(0, 268fr) minmax(0, 106fr) minmax(0, 152fr) / minmax(0, 1fr); line-height: 1.2; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dash3-side > * { min-height: 0; }
+.dash3-ch { display: flex; flex-direction: column; justify-content: space-evenly; }
+.dash3-head { display: grid; grid-template-columns: calc(80 * var(--u)) auto minmax(0, 1fr); align-items: center; gap: calc(14 * var(--u)); }
+.dash3-head img { display: block; box-sizing: border-box; width: 100%; aspect-ratio: 1; border-radius: 50%; border: calc(4 * var(--u)) solid var(--ch); object-fit: cover; }
+.dash3-spark { justify-self: end; width: calc(140 * var(--u)); }
+.dash3-count { text-align: center; }
+.dash3-count > div:first-child { font-size: calc(70 * var(--u)); font-weight: 800; line-height: 1; margin-bottom: calc(12 * var(--u)); }
+.dash3-count > div + div { font-size: calc(18 * var(--u)); color: #9ca3af; }
+.dash3-rates { display: grid; grid-template-columns: calc(88 * var(--u)) calc(112 * var(--u)) calc(134 * var(--u)) minmax(0, 1fr); }
+.dash3-rates > :last-child { text-align: right; }
+.dash3-rates > div > span { font-size: calc(16 * var(--u)); color: #9ca3af; }
+.dash3-rates > div > b { display: block; font-size: calc(23 * var(--u)); color: var(--ch); }
+.dash3-gap { display: flex; align-items: center; justify-content: space-between; border-block: 1px solid #2a2d38; }
+.dash3-gap > div + div { text-align: right; }
+.dash3-gap .l { font-size: calc(15 * var(--u)); color: #9ca3af; font-weight: 600; margin-bottom: calc(5 * var(--u)); }
+.dash3-gap .g { font-size: calc(50 * var(--u)); font-weight: 800; line-height: 1; }
+.dash3-gap .n { font-size: calc(26 * var(--u)); font-weight: 700; }
+.dash3-gap .t { font-size: calc(15 * var(--u)); color: #9ca3af; }
+.dash3-mile > div > div:last-child { font-size: calc(12 * var(--u)) !important; padding-inline: 0 !important; }
+.dash3-mile { display: grid; align-content: center; border-block: 1px solid #2a2d38; }
+.dash3-side .dash2-tz { font-size: calc(19 * var(--u)); padding: calc(8 * var(--u)) 0 0; justify-content: space-around; }
+.dash3-foot { display: flex; justify-content: space-between; gap: calc(16 * var(--u)); }
+.dash3-foot > * { flex: 1 1 auto; min-width: 0; }
+.dash3-foot > * + * { flex: none; width: calc(205 * var(--u)); }
+
+/* Default / Default+: every size comes from the page (--u = 1px of a 1600x900 page), never from the
+   text. The scoreboard rows use half-columns of the chart grid below (--n columns), so edges line up. */
+.dash2 { container-type: size; width: 100%; overflow: hidden; background: #181b24; color: #c8cdd6; }
+.dash2-in { --u: min(100cqw / 1600, 100cqh / 900); --g: 6px; box-sizing: border-box; height: 100%; padding: 8px 12px 4px; display: grid; gap: var(--g);
+  grid-template: minmax(0, 314fr) minmax(0, 130fr) minmax(0, 444fr) auto / minmax(0, 1fr); /* scoreboard 50% */ line-height: 1.2; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dash2-row { display: grid; gap: var(--g); grid-template-columns: repeat(calc(var(--n) * 2), minmax(0, 1fr)); min-height: 0; }
+/* Time zones take only what their longest line needs; the two channels share the rest. */
+.dash2-top { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) calc(284 * var(--u)); }
+.dash2-n5 .dash2-top { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) calc(230 * var(--u)); }
+.dash2-charts { display: grid; gap: var(--g); grid-template: repeat(2, minmax(0, 1fr)) / repeat(var(--n), minmax(0, 1fr)); min-height: 0; }
+.dash2-card { box-sizing: border-box; min-width: 0; min-height: 0; overflow: hidden; background: #0f1117; border: 1px solid #2a2d38; border-radius: 10px; }
+.dash2-ch { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; padding: calc(16 * var(--u)) calc(14 * var(--u)) calc(14 * var(--u)); border-color: var(--ch); background: color-mix(in srgb, var(--ch) 9%, #181b24); text-shadow: 1px 1px 3px rgb(0 0 0 / .5); }
+.dash2-head { display: grid; grid-template-columns: calc(116 * var(--u)) minmax(0, 1fr) calc(184 * var(--u)); gap: calc(12 * var(--u)); align-items: center; }
+.dash2-head img { display: block; box-sizing: border-box; width: 100%; aspect-ratio: 1; border-radius: 50%; border: 2px solid var(--ch); object-fit: cover; box-shadow: 2px 3px 5px rgb(0 0 0 / .45); }
+.dash2-name { display: flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(50 * var(--u)); font-weight: 700; color: var(--ch); }
+.dash3 .dash2-name { font-size: calc(37 * var(--u)); }
+.dash2:not(.dash2-n5) .dash2-name { font-size: calc(46 * var(--u)); gap: calc(5 * var(--u)); }
+.dash2:not(.dash2-n5) .dash2-name span { font-size: calc(26 * var(--u)); }
+.dash2-name span { font-size: calc(28 * var(--u)); }
+.dash2-spark { width: calc(200 * var(--u)); max-width: 100%; margin-top: calc(6 * var(--u)); }
+.dash2-rates { display: grid; gap: calc(6 * var(--u)); font-size: calc(20 * var(--u)); text-shadow: none; }
+.dash2-rates > div { display: grid; grid-template-columns: calc(76 * var(--u)) minmax(0, 1fr); }
+.dash2-rates b { font-weight: 700; }
+.dash2-rates > .dash2-aud { display: block; font-size: calc(15 * var(--u)); padding-top: calc(3 * var(--u)); }
+.dash2-aud small { font-size: calc(12 * var(--u)); }
+.dash2-dim { color: #9ca3af; }
+.dash2-count { align-self: center; text-align: center; line-height: 1; font-weight: 800; font-size: calc(97 * var(--u)); }
+.dash2-n5 .dash2-count { font-size: calc(102 * var(--u)); }
+/* Nine digits (either channel at 100M): both counts step down together. */
+.dash-9 .dash2-count { font-size: calc(87 * var(--u)); }
+.dash-9.dash2-n5 .dash2-count { font-size: calc(92 * var(--u)); }
+.dash2-subs { text-align: center; color: #9ca3af; font-size: calc(21 * var(--u)); }
+.dash2-tz { display: flex; flex-direction: column; justify-content: space-between; padding: calc(13 * var(--u)) calc(18 * var(--u)); }
+.dash2-tz { font-size: calc(26 * var(--u)); }
+.dash2-tz b { font-weight: 600; }
+.dash2-tz > .dash2-spd { border-top: 1px solid #2a2d38; padding-top: calc(9 * var(--u)); }
+.dash2-spd > span { display: block; font-size: calc(15 * var(--u)); color: #9ca3af; }
+.dash2-spd > b { font-weight: 700; font-size: calc(23 * var(--u)); }
+.dash2-n5 .dash2-tz { padding-inline: calc(14 * var(--u)); font-size: calc(21 * var(--u)); }
+.dash2-gap { display: grid; place-content: center; justify-items: center; gap: calc(5 * var(--u)); }
+.dash2-gap > span { font-size: calc(18 * var(--u)); color: #9ca3af; }
+.dash2-gap > b { font-size: calc(62 * var(--u)); font-weight: 800; line-height: 1; }
+.dash2-n5 .dash2-gap > b { font-size: calc(54 * var(--u)); }
+.dash2-mile { display: grid; align-content: center; padding: 0 calc(16 * var(--u)); }
+.dash2-mile > * { --u: calc(1.2 * min(100cqw / 1600, 100cqh / 900)); }
+.dash2-ahead { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 5fr); padding: 0 calc(14 * var(--u)); }
+.dash2-ahead > div { display: grid; align-content: center; gap: calc(3 * var(--u)); min-width: 0; }
+.dash2-ahead > div + div { border-left: 1px solid #2a2d38; padding-left: calc(14 * var(--u)); margin: calc(10 * var(--u)) 0; gap: calc(3 * var(--u)); }
+.dash2-ahead .l { font-size: calc(13.5 * var(--u)); color: #9ca3af; }
+.dash2-ahead .v { font-size: calc(19 * var(--u)); font-weight: 700; }
+.dash2-ahead .n { font-size: calc(19 * var(--u)); font-weight: 700; }
+.dash2-ahead .t { font-size: calc(15 * var(--u)); color: #9ca3af; }
+.dash2-n5 .dash2-ahead { --ex: 12.5; padding: 0 calc(10 * var(--u)); }
+.dash2-n5 .dash2-ahead > div + div { padding-left: calc(8 * var(--u)); }
+.dash2-n5 .dash2-ahead .l { font-size: calc(11.5 * var(--u)); }
+.dash2-n5 .dash2-ahead .v { font-size: calc(16 * var(--u)); }
+.dash2-n5 .dash2-ahead .n { font-size: calc(16 * var(--u)); }
+.dash2-n5 .dash2-ahead .t { font-size: calc(12 * var(--u)); }
 .dash-card-controls { opacity: 0; transition: opacity 120ms ease; }
 .dash-card:hover .dash-card-controls, .dash-card-controls:has(:focus-visible) { opacity: 1; }
 @media (hover: none) { .dash-card-controls { opacity: 1; } }
@@ -5275,14 +5444,15 @@ const DashMilestone = ({pdpSubs,tsSubs,pdpDaily,tsDaily,curTime:ct,dc,flare,flar
   // shrinks every metric (outer padding, header, bar height, in-bar label size,
   // side padding, ETA row) by roughly 20-30 % so the milestone block occupies
   // less vertical real estate in the lighter layout.
-  const pad       = flare ? "4px 0 5px"   : "6px 0 8px";
-  const headerFs  = flare ? 8             : 9;
-  const headerMb  = flare ? 3             : 5;
-  const barH      = flare ? 12            : 16;
-  const barFs     = flare ? 9             : 10;
-  const barSide   = flare ? 6             : 8;
-  const etaPad    = flare ? "3px 6px 0"   : "4px 8px 0";
-  const etaFs     = flare ? 8             : 8;
+  const u = n => `calc(${n} * var(--u, 0.69px))`;
+  const pad       = flare ? "4px 0 5px"   : `${u(6)} 0 ${u(9)}`;
+  const headerFs  = flare ? 8             : u(13);
+  const headerMb  = flare ? 3             : u(5);
+  const barH      = flare ? "12px"        : u(23);
+  const barFs     = flare ? 9             : u(15);
+  const barSide   = flare ? 6             : u(11);
+  const etaPad    = flare ? "3px 6px 0"   : `${u(5)} ${u(11)} 0`;
+  const etaFs     = flare ? 8             : u(13);
 
   const nextMs=(v)=>Math.ceil(v/1e6)*1e6;
   const prevMs=(v)=>Math.floor(v/1e6)*1e6;
@@ -5305,7 +5475,7 @@ const DashMilestone = ({pdpSubs,tsSubs,pdpDaily,tsDaily,curTime:ct,dc,flare,flar
     const next=val!=null?nextMs(val):null;
     const prev=val!=null?prevMs(val):null;
     const pct=val!=null&&next!==prev?((val-prev)/(next-prev))*100:0;
-    const radius=roundTop?`${barH/2}px ${barH/2}px 0 0`:`0 0 ${barH/2}px ${barH/2}px`;
+    const radius=roundTop?"8px 8px 0 0":"0 0 8px 8px";
     return (
       <div style={{background:barBg,borderRadius:radius,height:barH,overflow:"hidden",width:"100%",position:"relative"}}>
         <div style={{width:"100%",height:"100%",borderRadius:radius,background:`linear-gradient(90deg,${gradStart},${color})`,boxShadow:`0 0 8px ${color}4d`,transformOrigin:"left",transform:`scaleX(${pct/100})`,transition:duration?`transform ${duration}ms linear`:undefined}}/>
@@ -5355,7 +5525,7 @@ const DashMilestone = ({pdpSubs,tsSubs,pdpDaily,tsDaily,curTime:ct,dc,flare,flar
   }
 
   return (
-    <div style={{padding:pad,flexShrink:0}}>
+    <div style={{padding:pad,flexShrink:0,whiteSpace:"nowrap"}}>
       <div style={{fontSize:headerFs,color:d.TEXT,textAlign:"center",marginBottom:headerMb}}>Progress to Next Milestone</div>
       {renderBar("PDP",pdpDisp,d.PDP,pdpGradStart,true)}
       {renderBar("T-S",tsDisp,d.TS,tsGradStart,false)}
@@ -5745,9 +5915,8 @@ const overtakeInMs = (gap, pdpRate, tsRate) => {
 // A native popover (top layer, Esc and click-outside close it). Where anchor positioning is
 // missing it sits at the top right instead of under its button.
 const CFG_CSS = `
-.cfg-open { background:#1a2535; color:#9bbfdf; border:1px solid #2d4060; border-radius:5px; padding:5px 12px; font:inherit; font-size:13px; cursor:pointer; }
 .cfg-panel { position:fixed; inset:90px 14px auto auto; margin:0; box-sizing:border-box; width:min(370px, calc(100vw - 28px)); max-height:calc(100dvh - 110px); overflow-y:auto; overscroll-behavior:contain;
-  padding:14px 16px; background:#0e1018; color:#d5d9e2; border:1px solid #2d4060; border-radius:10px; box-shadow:0 12px 40px rgb(0 0 0 / .6);
+  padding:14px 16px; background:#12151d; color:#e6e9f0; border:1px solid #323a4c; border-radius:14px; box-shadow:0 12px 40px rgb(0 0 0 / .6);
   font-size:13px; line-height:1.35; white-space:normal; color-scheme:dark; accent-color:#5b9be0;
   opacity:0; translate:0 -6px; transition:opacity .15s, translate .15s, display .15s allow-discrete, overlay .15s allow-discrete; }
 .cfg-panel:popover-open { opacity:1; translate:0 0; }
@@ -5761,7 +5930,7 @@ const CFG_CSS = `
 .cfg-close:hover { background:#1a2535; color:#fff; }
 .cfg-group { border:0; margin:12px 0 0; padding:0; min-width:0; }
 .cfg-group legend { padding:0 0 2px; font-size:11px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:#8fa3bd; }
-.cfg-row { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:7px 0; border-top:1px solid #1d2230; }
+.cfg-row { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:7px 0; border-top:1px solid #232936; }
 label.cfg-row:has(.cfg-switch:enabled) { cursor:pointer; }
 .cfg-row:has(:disabled) { opacity:.45; }
 .cfg-row small { display:block; font-size:11.5px; color:#97a0b0; }
@@ -5779,8 +5948,74 @@ label.cfg-row:has(.cfg-switch:enabled) { cursor:pointer; }
 .cfg-choice label + label { border-left:1px solid #39445a; }
 .cfg-choice label:has(:checked) { background:#1e3050; color:#9fcdff; font-weight:600; }
 .cfg-choice input { position:absolute; inset:0; margin:0; opacity:0; pointer-events:none; }
-.cfg-open:focus-visible, .cfg-panel :focus-visible, .cfg-choice label:has(:focus-visible) { outline:2px solid #9fcdff; outline-offset:-1px; }
+.cfg-panel :focus-visible, .cfg-choice label:has(:focus-visible) { outline:2px solid #9fcdff; outline-offset:-1px; }
 .cfg-panel .cfg-switch:focus-visible { outline-offset:2px; }
+`;
+// - PLAYBACK BAR -
+// Plain groups, not role="toolbar": Space and the arrow keys are the player's shortcuts here.
+const BAR_CSS = `
+.pb { box-sizing:border-box; padding:8px 14px; background:#0e1118; border-bottom:1px solid #262c3a; color:#e6e9f0; color-scheme:dark;
+  font-family:'Inter','Roboto',system-ui,-apple-system,'Segoe UI',sans-serif; font-size:13px; line-height:1.2; font-variant-numeric:tabular-nums; }
+.pb-collapsed { padding:0; }
+.pb-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; white-space:nowrap; }
+.pb-row + .pb-row { margin-top:8px; }
+.pb-group { display:flex; align-items:center; gap:6px; }
+.pb-field { display:flex; align-items:center; gap:8px; color:#9aa3b5; font-size:12px; }
+.pb-end { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-left:auto; }
+.pb-sep { width:0; height:20px; border-left:1px solid #2b3242; }
+.pb-btn, .pb-select, .pb-input { box-sizing:border-box; min-height:32px; border:1px solid #2b3242; border-radius:8px; background:#171b25; color:#c9d0dc; font:inherit; }
+.pb-btn { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:32px; padding:0 12px; cursor:pointer; }
+.pb-btn[aria-pressed="true"] { background:#1f3358; border-color:#5b8fd8; color:#cfe2ff; font-weight:600; }
+.pb-icon { padding:0; width:34px; }
+.pb-ghost { background:none; border-color:transparent; color:#9aa3b5; }
+.pb-play { width:40px; border-radius:999px; background:#e6e9f0; border-color:#e6e9f0; color:#0e1118; }
+.pb-live::before { content:""; width:8px; height:8px; border-radius:50%; background:#6b7486; }
+.pb-live[aria-pressed="true"] { background:#3a181c; border-color:#d9535d; color:#ffc9cc; }
+.pb-live[aria-pressed="true"]::before { background:#ff5460; }
+.pb-btn[data-mode="alt"] { background:#2a1c3a; border-color:#8a63b8; color:#dcbdfa; font-weight:600; }
+.pb-btn[data-mode="100m"] { background:#2f2510; border-color:#a5843a; color:#f0cb7a; font-weight:600; }
+.pb-btn[aria-busy="true"] { opacity:.6; }
+.pb-select { padding:0 8px; cursor:pointer; }
+.pb-input { padding:0 8px; }
+.pb-num { width:54px; text-align:right; }
+.pb-clock { min-width:168px; font-size:14px; font-weight:600; color:#fff; }
+.pb-seg { display:inline-flex; gap:2px; padding:2px; background:#171b25; border:1px solid #2b3242; border-radius:9px; }
+.pb-seg button { min-height:26px; padding:0 11px; border:0; border-radius:6px; background:none; color:#9aa3b5; font:inherit; cursor:pointer; }
+.pb-seg button[aria-pressed="true"] { background:#32405c; color:#fff; font-weight:600; box-shadow:inset 0 0 0 1px #6b86b8; }
+.pb-fps { width:48px; text-align:right; font-size:11px; color:#858ea1; }
+.pb-keys { font-size:12px; color:#9aa3b5; }
+.pb-keys kbd { display:inline-block; padding:1px 6px; margin-right:5px; border:1px solid #3a4458; border-radius:5px; background:#171b25; color:#c9d0dc; font:inherit; font-size:11px; }
+.pb-keys span + span { margin-left:14px; }
+.pb-seek { flex:1 1 260px; min-width:min(260px, 100%); }
+.pb-steps { position:relative; display:flex; width:100px; }
+.pb-steps i { position:absolute; top:50%; width:2px; height:4px; translate:-1px -50%; background:#0e1118; pointer-events:none; }
+.pb-toggle { display:block; width:100%; height:18px; padding:0; border:0; background:none; color:#9aa3b5; line-height:0; cursor:pointer; }
+
+/* --p: 0..1 progress, set by React with the value. */
+.pb-range { --thumb:14px; --track:4px; --fill:#6ea8fe; --stop:calc(var(--p, 0) * (100% - var(--thumb)) + var(--thumb) / 2);
+  appearance:none; box-sizing:border-box; width:100%; height:28px; margin:0; padding:0; border:0; border-radius:6px; background:transparent; cursor:pointer; }
+.pb-range::-webkit-slider-runnable-track { height:var(--track); border-radius:99px; background:linear-gradient(to right, var(--fill) var(--stop), #626b80 var(--stop)); }
+.pb-range::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:var(--thumb); height:var(--thumb); margin-top:calc((var(--track) - var(--thumb)) / 2); border:0; border-radius:50%; background:#fff; }
+.pb-range::-moz-range-track { height:var(--track); border-radius:99px; background:#626b80; }
+.pb-range::-moz-range-progress { height:var(--track); border-radius:99px; background:var(--fill); }
+.pb-range::-moz-range-thumb { width:var(--thumb); height:var(--thumb); border:0; border-radius:50%; background:#fff; }
+.pb-seek .pb-range { --track:6px; --thumb:16px; display:block; }
+@media (forced-colors: active) { .pb-range { appearance:auto; } .pb-btn[aria-pressed="true"], .pb-seg button[aria-pressed="true"] { border:2px solid Highlight; } }
+:is(.pb-btn, .pb-select, .pb-input, .pb-range, .pb-toggle, .pb-seg button):focus-visible { outline:2px solid #8fbcff; outline-offset:2px; }
+@media (hover: hover) {
+  .pb-btn:hover { border-color:#4a566d; color:#fff; }
+  .pb-play:hover { background:#fff; border-color:#fff; color:#0e1118; }
+  .pb-ghost:hover { background:#1c212d; border-color:transparent; }
+  .pb-seg button:hover, .pb-toggle:hover { color:#fff; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pb-btn, .pb-seg button { transition:background-color .12s, border-color .12s, color .12s; }
+  .pb-live[aria-pressed="true"]::before { animation:pb-pulse 2s ease-in-out infinite; }
+}
+@keyframes pb-pulse { 50% { opacity:.35; } }
+@media (max-width: 1679px) { .pb-keys { display:none; } }
+@media (max-width: 760px) { .pb-seek { order:1; flex-basis:100%; } .pb-end { margin-left:0; } }
+@media (pointer: coarse) { .pb-btn, .pb-select, .pb-input { min-height:40px; } .pb-seg button { min-height:34px; } .pb-range { height:40px; } }
 `;
 const CfgGroup = ({ title, children }) => <fieldset className="cfg-group"><legend>{title}</legend>{children}</fieldset>;
 const CfgRow = ({ label, hint, children }) => (
@@ -5996,7 +6231,7 @@ export default function SocialBladeLive() {
 
   // STARTUP: a load at /live (or the first visit) is forced to the same preset
   // regardless of saved state - SocialBlade, dark, Predict Overtake, 14d Sub Gap, Realtime at 1x,
-  // 2s counter interval, 0.69 desync, Snap on (off at /live), at Now and playing. The view /
+  // 2s counter interval, 0.69 desync (0 at /live), Snap on (off at /live), at Now and playing. The view /
   // toggle / interval / position parts are set in their useState inits above.
   const didInit = useRef(false);
   useEffect(() => {
@@ -6015,7 +6250,7 @@ export default function SocialBladeLive() {
     }
     dispatch({type:"SET_MODE", mode:"rt"});
     dispatch({type:"SET_MULT", mult:1});
-    dispatch({type:"SET_DESYNC", value:0.69});
+    dispatch({type:"SET_DESYNC", value: _urlHas('live') ? 0 : 0.69});
     if (!_urlHas('live') && !initialPlayback.minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
   }, []);
 
@@ -6071,7 +6306,8 @@ export default function SocialBladeLive() {
   // transition between the two views we detect the "canonical
   // SocialBlade preset" vs "canonical Flare preset" and flip to the
   // other; we only act when RT mode is active and the *current*
-  // values match the expected source preset, so a user who has
+  // values match the expected source preset (and, going to SocialBlade,
+  // not in Live, whose desync defaults to 0), so a user who has
   // overridden either setting manually is left alone.
   const prevView = useRef(view);
   useEffect(() => {
@@ -6085,9 +6321,9 @@ export default function SocialBladeLive() {
       dispatch({ type: "SET_DESYNC", value: 0 });
       if (minuteSnap) dispatch({ type: "TOGGLE_MINUTE_SNAP" });
     } else if (prev === "flare" && curr === "socialblade"
-        && desync === 0 && !minuteSnap) {
+        && desync === 0 && !minuteSnap && !liveUrl) {
       dispatch({ type: "SET_DESYNC", value: 0.7 });
-      if (!liveUrl) dispatch({ type: "TOGGLE_MINUTE_SNAP" });
+      dispatch({ type: "TOGGLE_MINUTE_SNAP" });
     }
   }, [view, isRTMode, desync, minuteSnap]);
 
@@ -6180,8 +6416,8 @@ export default function SocialBladeLive() {
     clearRT();
     dispatch({type:"BUMP_SEEK"});
     dispatch({type:"SET_MODE", mode:"rt"});
-    // Flare wants one coherent live clock; SB / Dashboard want desync. Snap is off in Live.
-    dispatch({type:"SET_DESYNC", value: view === "flare" ? 0 : 0.7});
+    // Desync and Snap are off in Live by default.
+    dispatch({type:"SET_DESYNC", value:0});
     if (minuteSnap) dispatch({type:"TOGGLE_MINUTE_SNAP"});
     dispatch({type:"SET_MULT", mult:1});
     dispatch({type:"PLAY"});
@@ -6900,13 +7136,15 @@ export default function SocialBladeLive() {
 
   // Predict Overtake only takes effect while an overtake is still ahead: the
   // gap must be > 0 and at least one of the 1-30 day avg columns must predict
-  // T-Series passing PewDiePie within a year. Re-evaluated only when the table
+  // T-Series passing PewDiePie within a year. It is also hidden while T-Series
+  // has been ahead at any point in the last 24 hours. Re-evaluated only when the table
   // updates (tableTime), not on every counter tick.
   const sbOvertakeActive = useMemo(() => {
     if (!sbOvertake) return false;
+    if (tsAheadBetween(tableTime - DAY_MS, tableTime)) return false;
     const gap = tableDisplayPt != null && tableDisplayTt != null ? tableDisplayPt - tableDisplayTt : currentGap;
     return [4,5,6,7,8,9,10].some(ri => overtakeInMs(gap, subsPerMinTable.pdp[ri], subsPerMinTable.ts[ri]) != null);
-  }, [sbOvertake, tableTime, subsPerMinTable]);
+  }, [sbOvertake, realDataReady, tableTime, subsPerMinTable]);
 
   // effectiveSpeed: absolute sim-sec/real-sec shown next to the Dynamic button.
   // Multiplied by modeBaseSec so 1min/s and 1hr/s modes display the true combined rate.
@@ -7054,7 +7292,8 @@ export default function SocialBladeLive() {
   </CfgRow>;
 
   // Lowest flag: lowest gap so far, on the Sub Gap text's clock, in the selected display time
-  // zone, and the lowest of the current day unless that is the same moment.
+  // zone, and the lowest of the current day unless that is the same moment or it
+  // isn't under the gap at the start of the day (by more than per-second jitter).
   const lowestGapLines = (() => {
     if (!showLowest || view !== "socialblade" || showSBv2 || !realDataReady) return [];
     const now = (isRTMode && rtDisplay.midT != null) ? rtDisplay.midT : curTime;
@@ -7073,7 +7312,8 @@ export default function SocialBladeLive() {
     const midnight = Math.floor((now + _getDisplayOffset(now) * HOUR_MS) / DAY_MS) * DAY_MS;   // local, as if UTC
     const dayStart = midnight - _getDisplayOffset(midnight - _getDisplayOffset(now) * HOUR_MS) * HOUR_MS;
     const today = lowestGapBetween(dayStart, now);
-    if (today && today.t !== low.t) lines.push(line("Lowest Today", today, false));
+    const atStart = lowestGapBetween(dayStart, dayStart);
+    if (today && atStart && today.t !== low.t && atStart.gap - today.gap > LOWEST_TODAY_JITTER) lines.push(line("Lowest Today", today, false));
     return lines;
   })();
 
@@ -7196,7 +7436,6 @@ export default function SocialBladeLive() {
   const dashMileRef = useRef(null);
   const [dashScoreScale, setDashScoreScale] = useState(1);
   const [dashTargetH, setDashTargetH] = useState(0);
-  const leftPanelRef = useRef(null);
   const eDC = DC;
   useEffect(() => {
     let frames = [];
@@ -7257,55 +7496,6 @@ export default function SocialBladeLive() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [view, dashShowCharts, menuOpen, barHidden, ctrlBarH]);
-
-  // Panel zoom is written straight to the element (not React state) and fitted inside
-  // ResizeObserver callbacks, which run after layout but before paint - so a browser-zoom
-  // or bar-height change is corrected in the same frame instead of flashing for a few.
-  useLayoutEffect(() => {
-    if (view !== "dashboard" || !dashShowCharts) return;
-    const measure = () => {
-      const el = leftPanelRef.current;
-      const parent = el?.parentElement;
-      if (!el || !parent) return;
-      // The parent is the actual space the panel gets (minHeight 0, sized by the layout),
-      // so fit against it rather than a formula estimate.
-      const bH = barHidden ? 0 : ctrlBarH;
-      const availH = (parent.clientHeight || (window.innerHeight - bH - 12) * (dashAltLayout ? 0.52 : 1)) - 2;
-      const availW = (parent.clientWidth || Math.round(window.innerWidth * (dashAltLayout ? 1 : 0.33))) - 4;
-      const prev = { zoom: el.style.zoom, width: el.style.width, height: el.style.height, flex: el.style.flex };
-      el.style.zoom = '1';
-      el.style.height = 'max-content';
-      el.style.flex = 'none';
-      el.style.width = 'max-content';
-      const natW = el.scrollWidth;
-      let z = natW >= 10 ? Math.min(availW / natW, 3) : 1;
-      // Height is re-measured at the width the panel will actually be laid out at.
-      for (let k = 0; k < 4; k++) {
-        el.style.width = (availW / z) + 'px';
-        const natH = el.scrollHeight;
-        if (natH < 10) break;
-        const zH = availH / natH;
-        if (zH >= z) break;
-        z = zH;
-      }
-      el.style.width = prev.width;
-      el.style.height = prev.height;
-      el.style.flex = prev.flex;
-      const cur = parseFloat(prev.zoom) || 1;
-      el.style.zoom = String(Math.abs(cur - z) < 0.002 ? cur : z);
-    };
-    measure();
-    let alive = true;
-    document.fonts?.ready.then(() => { if (alive) measure(); });
-    // Re-fit whenever the available space or the content rows change size.
-    const ro = new ResizeObserver(measure);
-    const el = leftPanelRef.current;
-    if (el?.parentElement) ro.observe(el.parentElement);
-    if (el) for (const c of el.children) ro.observe(c);
-    // Counters render new digit counts in their own effect, after this one - measure again once they have.
-    const settle = setTimeout(measure, 100);
-    return () => { alive = false; clearTimeout(settle); ro.disconnect(); };
-  }, [view, dashShowCharts, barHidden, menuOpen, dashAltLayout, exPanelOn, String(Math.round(Math.abs(currentGap ?? 0))).length, String(Math.round(displayPt ?? 0)).length, String(Math.round(displayTt ?? 0)).length]);
 
   const pdpLeading =displayPt != null && displayTt != null && displayPt >= displayTt;
 
@@ -7922,11 +8112,6 @@ export default function SocialBladeLive() {
     return [lo - pad, hi + pad];
   };
 
-  const dashChartTicks = useMemo(() => {
-    if (view !== "dashboard" || !dashShowCharts) return [];
-    return thinMidnights(getMidnights(curTime - dashWin * DAY_MS, curTime), 8);
-  }, [view, dashShowCharts, curTime, dashWin, dispTz]);
-
   // LAYOUT: Dashboard counter helper - see LAYOUTS.md
   const dashRenderGap = (value) => {
     if (isRTMode) return <CasinoCounter value={value} signed duration={dur} seekToken={seekToken}/>;
@@ -7934,7 +8119,7 @@ export default function SocialBladeLive() {
   };
   // Sub Gap style: absolute value, no sign - the caller colors it by the leading channel.
   const dashRenderSubGap = (value) => (isRTMode
-    ? <CasinoCounter value={value != null ? Math.abs(value) : null} duration={dur} seekToken={seekToken}/>
+    ? <CasinoCounter key={realDataReady} value={value != null ? Math.abs(value) : null} duration={dur} seekToken={seekToken}/>
     : <CasinoStatic value={value != null ? Math.abs(value) : null} empty="-"/>);
   // Flare variant: absolute value, no sign. Uses the snappier FlareCasinoCounter,
   // whose duration is a fixed constant - deliberately independent of the current
@@ -7952,10 +8137,9 @@ export default function SocialBladeLive() {
   // LAYOUT: Dashboard counter helper - see LAYOUTS.md
   const dashRenderCounter = (value) => {
     if (!isRTMode) return <CasinoStatic value={value}/>;
-    return <CasinoCounter value={value} duration={dur} seekToken={seekToken}/>;
+    return <CasinoCounter key={realDataReady} value={value} duration={dur} seekToken={seekToken}/>;
   };
 
-  const dashXFormat = (ts) => { const d = new Date(ts + _getDisplayOffset(ts) * 3600000); return d.toLocaleDateString("en-US",{timeZone:"UTC",month:"short",day:"numeric"}); };
 
   // - Shared dashboard chart renderers -
   // cfg fields (gain/gap charts):
@@ -8157,23 +8341,6 @@ export default function SocialBladeLive() {
     const _chanKeys = dashChanFilter==='pdp'?[cfg.lineA.key]:dashChanFilter==='ts'?[cfg.lineB.key]:[cfg.lineA.key,cfg.lineB.key];
     const domT = dashGetRange(gdLive, _chanKeys, tAx, tMin);
     const dom = anim.dom('g', domT);
-    const yTicks = _ticksIn(niceTicks(domT, true), dom);
-    const edgeBufG = (tAx - tMin) * 0.1;
-    const allMidnightsG = thinMidnights(getMidnights(tMin, tAx), 6);
-    const midnightTicksG = allMidnightsG.filter(m => m - tMin > edgeBufG && tAx - m > edgeBufG);
-    const _midStepG = Math.ceil(midnightTicksG.length / 6);
-    const _shownMidnightsG = _midStepG > 1 ? midnightTicksG.filter((_,i) => i % _midStepG === 0) : midnightTicksG;
-    const midnightSetG = new Set(_shownMidnightsG);
-    const allAxisTicksG = [tMin, tAx, ..._shownMidnightsG];
-    const xFmtBase = span < 1
-      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
-      : span <= 24
-      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0"); })
-      : dashXFormat;
-    const xFmt = ts => {
-      if (midnightSetG.has(ts)) { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+' '+d.getUTCDate(); }
-      return xFmtBase(ts);
-    };
     const cardControls = (
       <React.Fragment>
         {ci === 1 && has5mData && (
@@ -8197,11 +8364,10 @@ export default function SocialBladeLive() {
         ) : (
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gdLive} margin={{top:4,right:70,bottom:0,left:0}}>
-            <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksG} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
-            {allMidnightsG.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
+            {dashAxes(`gain${dashLayout}:${effectiveCi}:${dashGainPerMin}`, eDC)}
+            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow height={22} tick={false} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
             {auditLines.map((a,i)=>{ const ch=appMode==='real'?a.channel:a[1]; const ts=appMode==='real'?a.ms:a[3]; const m=auditChans.find(mm=>mm.ch===ch); return <ReferenceLine key={"aud"+i} x={ts} stroke={m.color} strokeWidth={1} strokeDasharray="2 4" strokeOpacity={0.45} ifOverflow="hidden"/>; })}
-            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
+            <YAxis tick={false} axisLine={false} tickLine={false} width={56} domain={dom} allowDataOverflow/>
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gdLive, tMin)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1}/>
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.lineA.key} stroke={cfg.lineA.color} strokeWidth={1.8} dot={false} name={cfg.lineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
@@ -8243,31 +8409,13 @@ export default function SocialBladeLive() {
     const xDom = [tMin, tAx];
     const domT = dashGetRange(gd, ["gap"], tAx, tMin);
     const dom = anim.dom('gap', domT);
-    const yTicks = _ticksIn(niceTicks(domT, true), dom);
-    const edgeBufGap = (tAx - tMin) * 0.1;
-    const allMidnightsGap = thinMidnights(getMidnights(tMin, tAx), 6);
-    const midnightTicksGap = allMidnightsGap.filter(m => m - tMin > edgeBufGap && tAx - m > edgeBufGap);
-    const _midStepGap = Math.ceil(midnightTicksGap.length / 6);
-    const _shownMidnightsGap = _midStepGap > 1 ? midnightTicksGap.filter((_,i) => i % _midStepGap === 0) : midnightTicksGap;
-    const midnightSetGap = new Set(_shownMidnightsGap);
-    const allAxisTicksGap = [tMin, tAx, ..._shownMidnightsGap];
-    const xFmtBaseGap = span <= 1
-      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0"); })
-      : span <= 24
-      ? (ts => { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0"); })
-      : dashXFormat;
-    const xFmt = ts => {
-      if (midnightSetGap.has(ts)) { const d=new Date(ts+_getDisplayOffset(ts)*3600000); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+' '+d.getUTCDate(); }
-      return xFmtBaseGap(ts);
-    };
     return (
       <DashChartCard title={(cfg.viewPrefix || "") + gapLabel} dc={eDC} onExpand={openExplorer({ kind: "gap", title: "Subscriber Gap", t0: tMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={gd} margin={{top:4,right:70,bottom:0,left:0}}>
-            <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow ticks={allAxisTicksGap} interval={0} tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
-            {allMidnightsGap.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
-            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={dom} allowDataOverflow ticks={yTicks}/>
+            {dashAxes(`gap${dashLayout}:${ci}`, eDC)}
+            <XAxis dataKey="t" type="number" domain={xDom} allowDataOverflow height={22} tick={false} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <YAxis tick={false} axisLine={false} tickLine={false} width={56} domain={dom} allowDataOverflow/>
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(gd, tMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey="gap" stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.gapName} isAnimationActive={false}/>
@@ -8304,15 +8452,13 @@ export default function SocialBladeLive() {
     const hi = allVals.length ? Math.max(...allVals) : 50;
     const pad = Math.max((hi - lo) * 0.08, 5);
     const dom = [lo - pad, hi + pad];
-    const yTicks = niceTicks(dom, true);
-    const xFmt = ts => { const d = new Date(ts + _getDisplayOffset(ts)*3600000); return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0'); };
     return (
       <DashChartCard title={title} dc={eDC}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{top:4,right:70,bottom:0,left:0}}>
-            <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={[tMin, curTime]} allowDataOverflow tickFormatter={xFmt} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
-            <YAxis tickFormatter={v=>fmt(v)} domain={dom} ticks={yTicks} allowDataOverflow tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52}/>
+            {dashAxes("delta", eDC)}
+            <XAxis dataKey="t" type="number" domain={[tMin, curTime]} allowDataOverflow height={22} tick={false} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <YAxis tick={false} axisLine={false} tickLine={false} width={56} domain={dom} allowDataOverflow/>
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1}/>
             <Line type="monotone" dataKey="pdp" stroke={pdpColor} strokeWidth={1.5} dot={false} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>
             <Line type="monotone" dataKey="ts"  stroke={tsColor}  strokeWidth={1.5} dot={false} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>
@@ -8332,6 +8478,31 @@ export default function SocialBladeLive() {
       .catch(() => { setPatchSaveStatus('error'); setTimeout(()=>setPatchSaveStatus(null),3000); });
   };
 
+  // Time zone rows shared by the dashboard layouts: the date, then the time and zone under it.
+  const renderDashClocks = (month = "long") => tzDisplayMs && TIMEZONES.map(z => {
+            const off = z.getOffset(tzDisplayMs), label = z.label==="EST"?(off===-4?"EDT":"EST"):z.label==="GMT"?(off===1?"BST":"GMT"):z.label;
+            const d = new Date(tzDisplayMs + off*3600000);
+            const date = d.toLocaleDateString("en-US",{timeZone:"UTC",weekday:"short",month,day:"numeric",year:"numeric"});
+            const time = [d.getUTCHours(),d.getUTCMinutes(),d.getUTCSeconds()].map(v=>String(v).padStart(2,"0")).join(":");
+            return <div key={z.label}><div>{date}</div><div><b>{time} {label}</b> <span style={{fontSize:"0.875em",fontFamily:"'Twemoji Country Flags',Arial,sans-serif"}}>{z.flag}</span></div></div>;
+          });
+  const renderSideChannel = (c, ch, leading, subsLabel, showRates) => (
+    <div className="dash3-ch" style={{"--ch":c.color}}>
+      <div className="dash3-head">
+        <img src={c.icon} alt={c.name}/>
+        <div className="dash2-name">{c.name}<span style={{visibility:leading?"visible":"hidden"}}>👑</span></div>
+        <div className="dash3-spark"><DashSpark key={realDataReady} ch={ch} curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={c.color} height={"calc(54 * var(--u))"}/></div>
+      </div>
+      <div className="dash3-count"><div className="sub-count">{dashRenderCounter(c.display)}</div><div>{subsLabel}</div></div>
+      {showRates && <div className="dash3-rates">
+        {[0,1,2].map(i => <div key={i}><span>{c.rateLabels[i]}</span><b>{c.rates[i]==null?"\u2014":isRTMode?<CasinoCounter value={c.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={c.rates[i]} signed/>}</b></div>)}
+        {/* The channel's latest audit in the last 24h, with its start time */}
+        <div><span>Audit{c.lastAudit && " (" + (() => { const t = new Date(c.lastAudit.ms + _getDisplayOffset(c.lastAudit.ms) * 3600000); return [t.getUTCHours(), t.getUTCMinutes(), t.getUTCSeconds()].map(v => String(v).padStart(2, "0")).join(":"); })() + ")"}</span>
+          <b style={{color:c.lastAudit==null?eDC.DIM:c.lastAudit.mag>=0?"#4caf50":"#f44336"}}>{c.lastAudit==null?"--":<CasinoStatic value={Math.round(c.lastAudit.mag)} signed/>}</b></div>
+      </div>}
+    </div>
+  );
+
   const renderNormalDashboard = ({
     barH, chanA, chanB, gap, leadingIsA,
     diffLabel, aheadLabel, aheadName, leadDuration,
@@ -8339,74 +8510,19 @@ export default function SocialBladeLive() {
     chartCfg, pairedLabels, legendItems,
     milestoneEl, timezonesEl,
   }) => (
-    <div style={{background:eDC.BG,color:eDC.TEXT,fontFamily:dashFont,width:"100%",height:`calc(100vh - ${barH}px)`,display:"flex",flexDirection:"row",overflow:"hidden"}}>
-      {/* LEFT PANEL */}
-      <div style={{width:"33%",minWidth:220,flexShrink:0,overflow:"hidden",borderRight:"1px solid "+eDC.BORDER,display:"flex",alignItems:"flex-start",justifyContent:"flex-start"}}>
-        <div ref={leftPanelRef} style={{width:"100%",padding:"10px 14px 10px 24px",boxSizing:"border-box"}}>
-          {/* Channel A */}
-          <div style={{paddingBottom:8,marginBottom:0}}>
-            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
-              <img src={chanA.icon} alt={chanA.name} style={{width:62,height:62,borderRadius:"50%",border:"3px solid "+chanA.color,objectFit:"cover",flexShrink:0}}/>
-              <div>
-                <div style={{display:"flex",alignItems:"center",gap:6}}>
-                  <div style={{fontSize:28,fontWeight:700,color:chanA.color,lineHeight:1.1}}>{chanA.name}</div>
-                  <span style={{fontSize:24,visibility:leadingIsA?"visible":"hidden"}}>👑</span>
-                </div>
-              </div>
-              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="pdp" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
-            </div>
-            <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
-              {dashRenderCounter(chanA.display)}
-            </div>
-            <div style={{fontSize:14,color:eDC.DIM,marginBottom:4,textAlign:"center"}}>{subsLabel}</div>
-            {showRates && <div style={{display:"flex",gap:0}}>
-              <DashRateDisplay label={chanA.rateLabels[0]} value={chanA.rates[0]} color={chanA.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
-              <DashRateDisplay label={chanA.rateLabels[1]} value={chanA.rates[1]} color={chanA.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
-              <DashRateDisplay label={chanA.rateLabels[2]} value={chanA.rates[2]} color={chanA.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
-            </div>}
-          </div>
-          {/* Gap block */}
-          <div style={{display:"flex",alignItems:"center",padding:"8px 0",borderTop:"1px solid "+eDC.BORDER,borderBottom:"1px solid "+eDC.BORDER,margin:"8px 0",gap:12}}>
-            {/* Natural width, never clipped: the panel's zoom fit (leftPanelRef) measures this row. */}
-            <div style={{flex:"0 0 auto"}}>
-              <div style={{fontSize:10,color:eDC.DIM,fontWeight:700,marginBottom:4,whiteSpace:"nowrap"}}>{diffLabel}</div>
-              <div style={{fontSize:40,fontWeight:800,fontVariantNumeric:"tabular-nums",lineHeight:1,whiteSpace:"nowrap",color:gap!=null?(leadingIsA?"rgba(160,200,255,1)":"rgba(255,160,160,1)"):eDC.DIM}}>
-                {dashRenderSubGap(gap)}
-              </div>
-            </div>
-            <div style={{flex:"1 0 auto",textAlign:"right",whiteSpace:"nowrap"}}>
-              <div style={{fontSize:10,color:eDC.DIM,marginBottom:2}}>{aheadLabel}</div>
-              <div style={{fontSize:16,fontWeight:700,color:leadingIsA?chanA.color:chanB.color,marginBottom:1}}>{aheadName}</div>
-              <div style={{fontSize:12,color:eDC.DIM,fontVariantNumeric:"tabular-nums"}}>{leadDuration}</div>
-            </div>
-          </div>
-          {/* Channel B */}
-          <div style={{paddingBottom:8,marginBottom:8}}>
-            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
-              <img src={chanB.icon} alt={chanB.name} style={{width:62,height:62,borderRadius:"50%",border:"3px solid "+chanB.color,objectFit:"cover",flexShrink:0}}/>
-              <div>
-                <div style={{display:"flex",alignItems:"center",gap:6}}>
-                  <div style={{fontSize:28,fontWeight:700,color:chanB.color,lineHeight:1.1}}>{chanB.name}</div>
-                  <span style={{fontSize:24,visibility:leadingIsA?"hidden":"visible"}}>👑</span>
-                </div>
-              </div>
-              <div style={{width:150,flexShrink:1,minWidth:0,marginLeft:"auto"}}><DashSpark ch="ts" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
-            </div>
-            <div className="sub-count" style={{fontSize:54,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,marginBottom:2,textAlign:"center"}}>
-              {dashRenderCounter(chanB.display)}
-            </div>
-            <div style={{fontSize:14,color:eDC.DIM,marginBottom:4,textAlign:"center"}}>{subsLabel}</div>
-            {showRates && <div style={{display:"flex",gap:0}}>
-              <DashRateDisplay label={chanB.rateLabels[0]} value={chanB.rates[0]} color={chanB.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
-              <DashRateDisplay label={chanB.rateLabels[1]} value={chanB.rates[1]} color={chanB.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
-              <DashRateDisplay label={chanB.rateLabels[2]} value={chanB.rates[2]} color={chanB.color} dc={eDC} rt={isRTMode} duration={dur} seekToken={seekToken}/>
-            </div>}
-          </div>
-          {milestoneEl}
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:16}}>
-            <div style={{flex:"0 0 auto"}}>{timezonesEl}</div>
-            {exPanelOn && <div style={{flex:"0 0 auto",whiteSpace:"nowrap"}}>{renderExcessReadout(true)}</div>}
-          </div>
+    <div className="dash3" style={{background:eDC.BG,color:eDC.TEXT,fontFamily:dashFont,width:"100%",height:`calc(100vh - ${barH}px)`,display:"flex",flexDirection:"row",overflow:"hidden"}}>
+      {/* LEFT PANEL: PDP | difference | TS | milestones | time zones */}
+      <div className="dash3-side">
+        {renderSideChannel(chanA, "pdp", leadingIsA, subsLabel, showRates)}
+        <div className="dash3-gap">
+          <div><div className="l">{diffLabel}</div><div className="g" style={{color:gap!=null?(leadingIsA?"rgba(160,200,255,1)":"rgba(255,160,160,1)"):eDC.DIM}}>{dashRenderSubGap(gap)}</div></div>
+          <div><div className="l">{aheadLabel}</div><div className="n" style={{color:leadingIsA?chanA.color:chanB.color}}>{aheadName}</div><div className="t">{leadDuration}</div></div>
+        </div>
+        {renderSideChannel(chanB, "ts", !leadingIsA, subsLabel, showRates)}
+        <div className="dash3-mile">{milestoneEl}</div>
+        <div className="dash3-foot">
+          <div className="dash2-tz">{renderDashClocks()}</div>
+          {exPanelOn && renderExcessReadout(true)}
         </div>
       </div>
       {/* RIGHT PANEL */}
@@ -8470,135 +8586,75 @@ export default function SocialBladeLive() {
     // Per-second mode swaps the finest gain+gap pair (ci0 in Alt+, ci6 in Alt) for
     // the 1s-gain / 1min-gap pair (ci7), where that data exists.
     const psAlt = dashPerSecond && altChartCfg.gainData[7] != null && altGapChartCfg.gainData[7] != null;
+    const n = dashAltPlus ? 5 : 4; // chart columns
     return (
-    <div style={{background:eDC.BG,color:eDC.TEXT,fontFamily:dashFont,width:"100%",height:`calc(100vh - ${barH}px)`,display:"flex",flexDirection:"column",overflow:"hidden",padding:"8px 12px 4px",boxSizing:"border-box",gap:6}}>
-
-      {/* Rows 1+2 — zoom-scaled to fit top portion of viewport */}
-      <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        <div ref={leftPanelRef} style={{flex:1,width:"100%",display:"flex",flexDirection:"column"}}>
-          {/* Row 1: PDP | TS | Timezones */}
-          <div style={{display:"flex",flexDirection:"row",alignItems:"stretch",gap:8,marginBottom:6,flex:1}}>
-            {/* Channel A */}
-            <div style={{display:"flex",flexDirection:"column",alignItems:"center",flex:1,minWidth:0,justifyContent:"space-between",border:"1px solid "+chanA.color,borderRadius:10,background:chanA.color+"18",padding:"8px 10px",boxSizing:"border-box"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,width:"100%"}}>
-                <img src={chanA.icon} alt={chanA.name} style={{width:80,height:80,borderRadius:"50%",border:"2px solid "+chanA.color,objectFit:"cover",flexShrink:0,boxShadow:"2px 3px 5px rgba(0,0,0,0.45)"}}/>
-                <div>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <div style={{fontSize:28,fontWeight:700,color:chanA.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanA.name}</div>
-                    <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"visible":"hidden",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
-                  </div>
-                  <div style={{width:150,marginTop:3}}><DashSpark ch="pdp" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanA.color} height={40}/></div>
-                </div>
-                {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
-                  {[0,1,2].map(i=>(
-                    <div key={i} style={{fontSize:12,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",display:"flex"}}>
-                      <span style={{color:eDC.DIM,width:45,flexShrink:0,textAlign:"left"}}>{chanA.rateLabels[i]}:</span>
-                      <span style={{color:chanA.rates[i]!=null?(chanA.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanA.rates[i]==null?"--":isRTMode?<CasinoCounter value={chanA.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={chanA.rates[i]} signed/>}</span>
-                    </div>
-                  ))}
-                  {dashAuditRow(chanA.lastAudit)}
-                </div>}
+    <div className={(dashAltPlus ? "dash2 dash2-n5" : "dash2") + (Math.max(chanA.display ?? 0, chanB.display ?? 0) >= 1e8 ? " dash-9" : "")} style={{height:`calc(100vh - ${barH}px)`,fontFamily:dashFont}}>
+    <div className="dash2-in" style={{"--n":n}}>
+      {/* Row 1: PDP | TS | time zones */}
+      <div className="dash2-row dash2-top">
+        {[[chanA,"pdp",leadingIsA],[chanB,"ts",!leadingIsA]].map(([c,ch,leading]) => (
+          <div key={ch} className="dash2-card dash2-ch" style={{"--ch":c.color}}>
+            <div className="dash2-head">
+              <img src={c.icon} alt={c.name}/>
+              <div>
+                <div className="dash2-name">{c.name}<span style={{visibility:leading?"visible":"hidden"}}>👑</span></div>
+                <div className="dash2-spark"><DashSpark key={realDataReady} ch={ch} curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={c.color} height={"calc(38 * var(--u))"}/></div>
               </div>
-              <div className="sub-count" style={{fontSize:56,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,textAlign:"center",textShadow:"1px 1px 3px rgba(0,0,0,0.5)",width:"100%",overflow:"hidden"}}>
-                {dashRenderCounter(chanA.display)}
-              </div>
-              <div style={{fontSize:12,color:eDC.DIM,textAlign:"center"}}>{subsLabel}</div>
-            </div>
-            {/* Channel B */}
-            <div style={{display:"flex",flexDirection:"column",alignItems:"center",flex:1,minWidth:0,justifyContent:"space-between",border:"1px solid "+chanB.color,borderRadius:10,background:chanB.color+"18",padding:"8px 10px",boxSizing:"border-box"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,width:"100%"}}>
-                <img src={chanB.icon} alt={chanB.name} style={{width:80,height:80,borderRadius:"50%",border:"2px solid "+chanB.color,objectFit:"cover",flexShrink:0,boxShadow:"2px 3px 5px rgba(0,0,0,0.45)"}}/>
-                <div>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <div style={{fontSize:28,fontWeight:700,color:chanB.color,textShadow:"1px 1px 3px rgba(0,0,0,0.5)"}}>{chanB.name}</div>
-                    <span style={{fontSize:20,lineHeight:1,position:"relative",top:-2,visibility:leadingIsA?"hidden":"visible",filter:"drop-shadow(1px 1px 2px rgba(0,0,0,0.5))"}}>👑</span>
-                  </div>
-                  <div style={{width:150,marginTop:3}}><DashSpark ch="ts" curTime={curTime} smooth={rdLerp} stripAudits={effectiveFilterAudits} color={chanB.color} height={40}/></div>
-                </div>
-                {showRates && <div style={{marginLeft:"auto",marginRight:16,display:"flex",flexDirection:"column",gap:3}}>
-                  {[0,1,2].map(i=>(
-                    <div key={i} style={{fontSize:12,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",display:"flex"}}>
-                      <span style={{color:eDC.DIM,width:45,flexShrink:0,textAlign:"left"}}>{chanB.rateLabels[i]}:</span>
-                      <span style={{color:chanB.rates[i]!=null?(chanB.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM,fontWeight:700,display:"inline-block",width:65,textAlign:"left"}}>{chanB.rates[i]==null?"--":isRTMode?<CasinoCounter value={chanB.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={chanB.rates[i]} signed/>}</span>
-                    </div>
-                  ))}
-                  {dashAuditRow(chanB.lastAudit)}
-                </div>}
-              </div>
-              <div className="sub-count" style={{fontSize:56,fontWeight:800,fontVariantNumeric:"tabular-nums",color:eDC.TEXT,letterSpacing:0,lineHeight:1,textAlign:"center",textShadow:"1px 1px 3px rgba(0,0,0,0.5)",width:"100%",overflow:"hidden"}}>
-                {dashRenderCounter(chanB.display)}
-              </div>
-              <div style={{fontSize:12,color:eDC.DIM,textAlign:"center"}}>{subsLabel}</div>
-            </div>
-            {/* Timezones */}
-            <div style={{background:eDC.CARD,border:"1px solid "+eDC.BORDER,borderRadius:10,padding:"8px 13px",flexShrink:0,width:200,display:"flex",flexDirection:"column",justifyContent:"flex-start",alignSelf:"stretch"}}>
-              {timezonesEl}
-              <div style={{borderTop:"1px solid "+eDC.BORDER,marginTop:8,paddingTop:8}}>
-                <div style={{fontSize:9,color:eDC.DIM,marginBottom:2}}>Playback Speed</div>
-                <div style={{fontSize:14,fontWeight:700,color:eDC.TEXT,fontVariantNumeric:"tabular-nums"}}>{effectiveSpeed!=null?Math.round(effectiveSpeed)+"s/s":mult.toFixed(mult<10?2:0)+"x"}</div>
-              </div>
-            </div>
-          </div>
-          {/* Row 2: Sub Gap (25%) | Milestone (50%) | Ahead (25%) */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 2fr 1fr",gap:6}}>
-            <div style={{background:eDC.CARD,border:"1px solid "+eDC.BORDER,borderRadius:10,padding:"6px 10px",boxSizing:"border-box",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-              <div style={{fontSize:14,color:eDC.DIM,fontWeight:400,marginBottom:4}}>Sub Gap</div>
-              <div style={{fontSize:36,fontWeight:800,fontVariantNumeric:"tabular-nums",lineHeight:1,color:gap!=null?(leadingIsA?"rgba(160,200,255,1)":"rgba(255,160,160,1)"):eDC.DIM,textAlign:"center"}}>
-                {dashRenderSubGap(gap)}
-              </div>
-            </div>
-            <div style={{background:eDC.CARD,border:"1px solid "+eDC.BORDER,borderRadius:10,padding:"0 12px",boxSizing:"border-box",display:"flex",flexDirection:"column",justifyContent:"center"}}>
-              {milestoneEl}
-            </div>
-            <div style={{background:eDC.CARD,border:"1px solid "+eDC.BORDER,borderRadius:10,padding:"8px 12px",boxSizing:"border-box",display:"grid",gridTemplateColumns:"2fr 3fr",gap:0}}>
-              <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:2}}>
-                <div style={{fontSize:9,color:eDC.DIM}}>{aheadLabel}</div>
-                <div style={{fontSize:14,fontWeight:700,color:leadingIsA?chanA.color:chanB.color}}>{aheadName}</div>
-                <div style={{fontSize:11,color:eDC.DIM,fontVariantNumeric:"tabular-nums"}}>{leadDuration}</div>
-              </div>
-              {exPanelOn ? <div style={{display:"flex",flexDirection:"column",justifyContent:"center",paddingLeft:14,marginLeft:14,borderLeft:"1px solid "+eDC.BORDER}}>{renderExcessReadout(false)}</div> :
-              <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingLeft:14,marginLeft:14,borderLeft:"1px solid "+eDC.BORDER}}>
-                <div>
-                  <div style={{fontSize:8,color:eDC.DIM,fontWeight:600,marginBottom:1}}>Number of Takeovers</div>
-                  <div style={{fontSize:12,fontWeight:700,fontVariantNumeric:"tabular-nums",color:eDC.TS}}>{tsTakeoverCountLegit} <span style={{fontSize:10,fontWeight:500,color:eDC.DIM}}>({tsTakeoverCount})</span></div>
-                </div>
-                <div>
-                  <div style={{fontSize:8,color:eDC.DIM,fontWeight:600,marginBottom:1}}>Total Time T-Series Ahead</div>
-                  {(()=>{
-                    const s = Math.floor(tsTotalSecsAhead);
-                    const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60), sec = s%60;
-                    const fmt = d>0?`${d}d ${h}h ${m}m ${sec}s`:h>0?`${h}h ${m}m ${sec}s`:`${m}m ${sec}s`;
-                    return <div style={{fontSize:12,fontWeight:700,fontVariantNumeric:"tabular-nums",color:eDC.TS}}>{fmt}</div>;
-                  })()}
-                </div>
+              {showRates && <div className="dash2-rates">
+                {[0,1,2].map(i => <div key={i}><span className="dash2-dim">{c.rateLabels[i]}:</span><b style={{color:c.rates[i]!=null?(c.rates[i]>=0?"#4caf50":"#f44336"):eDC.DIM}}>{c.rates[i]==null?"--":isRTMode?<CasinoCounter value={c.rates[i]} signed duration={dur} seekToken={seekToken}/>:<CasinoStatic value={c.rates[i]} signed/>}</b></div>)}
+                {dashAuditRow(c.lastAudit)}
               </div>}
             </div>
+            <div className="sub-count dash2-count">{dashRenderCounter(c.display)}</div>
+            <div className="dash2-subs">{subsLabel}</div>
           </div>
+        ))}
+        <div className="dash2-card dash2-tz">
+          {renderDashClocks("short")}
+          <div className="dash2-spd"><span>Playback Speed</span><b>{effectiveSpeed!=null?Math.round(effectiveSpeed)+"s/s":mult.toFixed(mult<10?2:0)+"x"}</b></div>
+        </div>
+      </div>
+      {/* Row 2: Sub Gap | Milestone | Ahead */}
+      <div className="dash2-row">
+        <div className="dash2-card dash2-gap" style={{gridColumn:"span 2"}}><span>Sub Gap</span>
+          <b style={{color:gap!=null?(leadingIsA?"rgba(160,200,255,1)":"rgba(255,160,160,1)"):eDC.DIM}}>{dashRenderSubGap(gap)}</b></div>
+        <div className="dash2-card dash2-mile" style={{gridColumn:`span ${n * 2 - 4}`}}>{milestoneEl}</div>
+        <div className="dash2-card dash2-ahead" style={{gridColumn:"span 2"}}>
+          <div><span className="l">{aheadLabel}</span><span className="n" style={{color:leadingIsA?chanA.color:chanB.color}}>{aheadName}</span><span className="t">{leadDuration}</span></div>
+          {exPanelOn ? <div>{renderExcessReadout(false)}</div> : <div>
+            <span className="l">Number of Takeovers</span>
+            <span className="v" style={{color:eDC.TS}}>{tsTakeoverCountLegit} <span className="t">({tsTakeoverCount})</span></span>
+            <span className="l">Total Time T-Series Ahead</span>
+            <span className="v" style={{color:eDC.TS}}>{(()=>{
+              const s = Math.floor(tsTotalSecsAhead), d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60), sec = s%60;
+              return d>0?`${d}d ${h}h ${m}m ${sec}s`:h>0?`${h}h ${m}m ${sec}s`:`${m}m ${sec}s`;
+            })()}</span>
+          </div>}
         </div>
       </div>
 
-      {/* Chart grid: 4 cols x 2 rows — 40% of viewport height */}
+      {/* Charts: n cols x 2 rows */}
       {dashAltPlus ? (
-      <div style={{flex:"0 0 47%",minHeight:0,display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gridTemplateRows:"1fr 1fr",gap:6}}>
-        <div style={{gridColumn:1,gridRow:1,minHeight:0,display:"flex"}}>{renderDashGapChart(0,"10min Gap","100%",altGapChartCfg)}</div>
-        <div style={{gridColumn:2,gridRow:1,minHeight:0,display:"flex"}}>{renderDashGapChart(1,"1hr Gap","100%",altGapChartCfg)}</div>
-        <div style={{gridColumn:3,gridRow:1,minHeight:0,display:"flex"}}>{renderDashGapChart(2,"24hr Gap","100%",altGapChartCfg)}</div>
-        <div style={{gridColumn:4,gridRow:1,minHeight:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'gap')}</div>
-        <div style={{gridColumn:1,gridRow:2,minHeight:0,display:"flex"}}>{renderDashGainChart(psAlt?7:0,"100%",altChartCfg)}</div>
-        <div style={{gridColumn:2,gridRow:2,minHeight:0,display:"flex"}}>{renderDashGainChart(1,"100%",altChartCfg)}</div>
-        <div style={{gridColumn:3,gridRow:2,minHeight:0,display:"flex"}}>{renderDashGainChart(2,"100%",altChartCfg)}</div>
-        <div style={{gridColumn:4,gridRow:2,minHeight:0,display:"flex"}}>{renderDashGainChart(4,"100%",altChartCfg)}</div>
-        <div style={{gridColumn:5,gridRow:"1 / 3",minHeight:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'subs')}</div>
+      <div className="dash2-charts">
+        <div style={{gridColumn:1,gridRow:1,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGapChart(0,"10min Gap","100%",altGapChartCfg)}</div>
+        <div style={{gridColumn:2,gridRow:1,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGapChart(1,"1hr Gap","100%",altGapChartCfg)}</div>
+        <div style={{gridColumn:3,gridRow:1,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGapChart(2,"24hr Gap","100%",altGapChartCfg)}</div>
+        <div style={{gridColumn:4,gridRow:1,minHeight:0,minWidth:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'gap')}</div>
+        <div style={{gridColumn:1,gridRow:2,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGainChart(psAlt?7:0,"100%",altChartCfg)}</div>
+        <div style={{gridColumn:2,gridRow:2,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGainChart(1,"100%",altChartCfg)}</div>
+        <div style={{gridColumn:3,gridRow:2,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGainChart(2,"100%",altChartCfg)}</div>
+        <div style={{gridColumn:4,gridRow:2,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGainChart(4,"100%",altChartCfg)}</div>
+        <div style={{gridColumn:5,gridRow:"1 / 3",minHeight:0,minWidth:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'subs')}</div>
       </div>
       ) : (
-      <div style={{flex:"0 0 47%",minHeight:0,display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gridTemplateRows:"1fr 1fr",gap:6}}>
-        <div style={{gridColumn:1,gridRow:1,minHeight:0,display:"flex"}}>{renderDashGapChart(6,"1hr Gap","100%",altGapChartCfg)}</div>
-        <div style={{gridColumn:2,gridRow:1,minHeight:0,display:"flex"}}>{renderDashGapChart(2,"24hr Gap","100%",altGapChartCfg)}</div>
-        <div style={{gridColumn:3,gridRow:1,minHeight:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'gap')}</div>
-        <div style={{gridColumn:1,gridRow:2,minHeight:0,display:"flex"}}>{renderDashGainChart(psAlt?7:6,"100%",altChartCfg)}</div>
-        <div style={{gridColumn:2,gridRow:2,minHeight:0,display:"flex"}}>{renderDashGainChart(2,"100%",altChartCfg)}</div>
-        <div style={{gridColumn:3,gridRow:2,minHeight:0,display:"flex"}}>{renderDashGainChart(4,"100%",altChartCfg)}</div>
-        <div style={{gridColumn:4,gridRow:"1 / 3",minHeight:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'subs')}</div>
+      <div className="dash2-charts">
+        <div style={{gridColumn:1,gridRow:1,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGapChart(6,"1hr Gap","100%",altGapChartCfg)}</div>
+        <div style={{gridColumn:2,gridRow:1,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGapChart(2,"24hr Gap","100%",altGapChartCfg)}</div>
+        <div style={{gridColumn:3,gridRow:1,minHeight:0,minWidth:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'gap')}</div>
+        <div style={{gridColumn:1,gridRow:2,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGainChart(psAlt?7:6,"100%",altChartCfg)}</div>
+        <div style={{gridColumn:2,gridRow:2,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGainChart(2,"100%",altChartCfg)}</div>
+        <div style={{gridColumn:3,gridRow:2,minHeight:0,minWidth:0,display:"flex"}}>{renderDashGainChart(4,"100%",altChartCfg)}</div>
+        <div style={{gridColumn:4,gridRow:"1 / 3",minHeight:0,minWidth:0,display:"flex"}}>{renderDashTotalCharts(altChartCfg,"100%",null,'subs')}</div>
       </div>
       )}
 
@@ -8608,6 +8664,7 @@ export default function SocialBladeLive() {
           <span key={l.label}><span style={{display:"inline-block",width:12,height:3,background:l.color,borderRadius:2,marginRight:6,verticalAlign:"middle"}}/>{l.label}</span>
         ))}
       </div>
+    </div>
     </div>
     );
   };
@@ -8619,7 +8676,7 @@ export default function SocialBladeLive() {
   const renderExcessReadout = (big = false) => {
     const exP = excessOn ? excessAt(pdpTime) : null, exT = excessOn ? excessAt(tsTime) : null;
     const pdpEx = exP ? exP.pdp : null, tsEx = exT ? exT.ts : null;
-    const fs1 = big ? 14 : 10, lbl = big ? 11 : 9;
+    const fs1 = big ? "calc(19 * var(--u))" : "calc(var(--ex, 15.5) * var(--u))", lbl = big ? "calc(15 * var(--u))" : "calc(12 * var(--u))";
     const pct = (v) => isRTMode
       ? <><CasinoCounter value={Math.round(v / tot * 10000)} decimals={2} duration={dur} seekToken={seekToken}/>%</>
       : <><CasinoStatic value={Math.round(v / tot * 10000)} decimals={2}/>%</>;
@@ -8643,11 +8700,11 @@ export default function SocialBladeLive() {
   // 1 Day (own flow, not their columns, slightly smaller): the channel's latest audit in the
   // last 24h (getRdLastAudit) with its start time, "--" if none.
   const dashAuditRow = (a) => (
-    <div style={{fontSize:11,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",marginTop:4}}>
+    <div className="dash2-aud">
       <span style={{color:eDC.DIM}}>Audit: </span>
       {a == null ? <span style={{color:eDC.DIM,fontWeight:700}}>--</span> : <>
         <span style={{color:a.mag>=0?"#4caf50":"#f44336",fontWeight:700}}><CasinoStatic value={Math.round(a.mag)} signed/></span>
-        <span style={{color:eDC.DIM,fontSize:9}}> ({(() => { const d = new Date(a.ms + _getDisplayOffset(a.ms) * 3600000); return [d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()].map(n => String(n).padStart(2, "0")).join(":"); })()})</span>
+        <small className="dash2-dim"> ({(() => { const d = new Date(a.ms + _getDisplayOffset(a.ms) * 3600000); return [d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()].map(n => String(n).padStart(2, "0")).join(":"); })()})</small>
       </>}
     </div>
   );
@@ -8668,10 +8725,8 @@ export default function SocialBladeLive() {
     }
     const totDomT = dashGetRange(totalData, _totKeys, curTime, totTMin);
     const totDom = anim.dom('tot', totDomT);
-    const totTicks = _ticksIn(niceTicks(totDomT), totDom);
     const gapDomT = dashGetRange(totalData, [cfg.totalGapKey], curTime, totTMin);
     const gapDom = anim.dom('totGap', gapDomT);
-    const gapTicks = _ticksIn(niceTicks(gapDomT), gapDom);
 
     const totXDom = [totTMin, curTime];
     const gapXDom = [totTMin, curTime];
@@ -8679,10 +8734,9 @@ export default function SocialBladeLive() {
       <DashChartCard title={cfg.totalTitle} dc={eDC} onExpand={openExplorer({ kind: "subs", title: "Total Subscribers", t0: totTMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={totalData} margin={{top:4,right:70,bottom:0,left:0}}>
-            <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={totXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
-            {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
-            <YAxis tickFormatter={v=>fmt(v,cfg.totalFmt||"subs")} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={totDom} allowDataOverflow ticks={totTicks}/>
+            {dashAxes("total", eDC)}
+            <XAxis dataKey="t" type="number" domain={totXDom} allowDataOverflow height={22} tick={false} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <YAxis tick={false} axisLine={false} tickLine={false} width={56} domain={totDom} allowDataOverflow/>
             {!isRTMode && <Tooltip content={<DashTooltip fmtMode={cfg.totalFmt||"subs"} dc={eDC} {...dashAuditTip(cfg.totalData, totTMin)}/>}/>}
             {dashChanFilter!=='ts'  && <Line type="monotone" dataKey={cfg.totalLineA.key} stroke={cfg.totalLineA.color} strokeWidth={2} dot={false} name={cfg.totalLineA.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
             {dashChanFilter!=='pdp' && <Line type="monotone" dataKey={cfg.totalLineB.key} stroke={cfg.totalLineB.color} strokeWidth={2} dot={false} name={cfg.totalLineB.name} isAnimationActive={false} style={{mixBlendMode:"screen"}}/>}
@@ -8695,10 +8749,9 @@ export default function SocialBladeLive() {
       <DashChartCard title={cfg.gapTitle} dc={eDC} onExpand={openExplorer({ kind: "gap", title: "Subscriber Gap", t0: totTMin, t1: curTime })}>
         <ResponsiveContainer width="100%" height={h}>
           <LineChart data={totalData} margin={{top:4,right:70,bottom:0,left:0}}>
-            <CartesianGrid stroke="#2e3348" strokeDasharray="3 3" vertical={false}/>
-            <XAxis dataKey="t" type="number" domain={gapXDom} allowDataOverflow ticks={dashChartTicks} tickFormatter={dashXFormat} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
-            {dashChartTicks.map(m=><ReferenceLine key={m} x={m} stroke="#2a2d38" strokeWidth={1}/>)}
-            <YAxis tickFormatter={v=>fmt(v)} tick={{fill:eDC.DIM,fontSize:10,fontFamily:"Inter,Roboto,system-ui,sans-serif"}} axisLine={false} tickLine={false} width={52} domain={gapDom} allowDataOverflow ticks={gapTicks}/>
+            {dashAxes("totalGap", eDC)}
+            <XAxis dataKey="t" type="number" domain={gapXDom} allowDataOverflow height={22} tick={false} axisLine={{stroke:eDC.BORDER}} tickLine={false}/>
+            <YAxis tick={false} axisLine={false} tickLine={false} width={56} domain={gapDom} allowDataOverflow/>
             {!isRTMode && <Tooltip content={<DashTooltip dc={eDC} {...dashAuditTip(cfg.totalData, totTMin, true)}/>}/>}
             <ReferenceLine y={0} stroke="#5a5f72" strokeWidth={1.5}/>
             <Line type="monotone" dataKey={cfg.totalGapKey} stroke={"#e2e5eb"} strokeWidth={2} dot={false} name={cfg.totalGapName} isAnimationActive={false}/>
@@ -8736,132 +8789,95 @@ export default function SocialBladeLive() {
           correctly. Inter is loaded for the Dashboard chrome (charts, controls,
           labels), falling back to Roboto; FlareView overrides explicitly so it
           stays Roboto/CBO. */}
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-      `}</style>
       <style>{CFG_CSS}</style>
+      <style>{BAR_CSS}</style>
       {barHidden && <div style={{ position:"fixed", top:16, left:"50%", transform:`translate(-50%, ${barHintVisible ? 0 : -12}px)`, opacity:barHintVisible ? 1 : 0, transition:"opacity 0.2s, transform 0.2s", pointerEvents:"none", zIndex:10000, background:"rgba(14,16,24,0.95)", color:"#fff", border:"1px solid #2d4060", borderRadius:8, padding:"12px 24px", fontSize:20, fontWeight:600, boxShadow:"0 6px 24px rgba(0,0,0,0.6)", whiteSpace:"nowrap" }}>
         Press <span style={{ display:"inline-block", background:"#1a2535", color:"#7cb9f7", border:"1px solid #2d4060", borderRadius:4, padding:"0 8px", margin:"0 2px" }}>H</span> to show playback bar
       </div>}
       {/* - Control Bar - */}
-      {!barHidden && <div data-controlbar ref={ctrlBarRef} style={{ borderBottom:"1px solid #333", fontFamily:"'Inter','Roboto',system-ui,-apple-system,'Segoe UI',sans-serif", fontSize:12, color:"#ccc" }}>
-        {menuOpen && <div style={{ padding:"4px 14px 6px", display:"flex", alignItems:"stretch", gap:0, rowGap:6, flexWrap:"wrap", whiteSpace:"nowrap" }}>
-
-          {/* PLAY */}
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
-            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>PLAY</span>
-            <div style={{display:"flex",alignItems:"center",gap:4}}>
-              <button onClick={()=>dispatch({type:"TOGGLE_PLAY"})} style={{ background:playing?"#162036":"#162016", color:playing?"#6baee8":"#5dba6e", border:"none", borderRadius:5, padding:"5px 14px", fontWeight:700, fontSize:15, cursor:"pointer", fontFamily:"inherit", minWidth:44 }}>{playing?"⏸":"▶"}</button>
-              <button onClick={()=>dispatch({type:"TOGGLE_REVERSE"})} title="Reverse playback" style={{ background:reverse?"#1e2535":"transparent", color:reverse?"#8aaccc":"#777", border:"1px solid "+(reverse?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"5px 10px", fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>{"◀"}</button>
-              {/* Live: jumps to Now and goes to /live. Already there and playing at Now, it leaves /live instead. */}
-              <button onClick={()=>{
+      {!barHidden && <div data-controlbar ref={ctrlBarRef} role="region" aria-label="Playback bar" className={menuOpen ? "pb" : "pb pb-collapsed"}>
+        {menuOpen && <>
+        {/* Row 1: transport, seek, clock */}
+        <div className="pb-row">
+          <div className="pb-group" role="group" aria-label="Playback">
+            <button type="button" className="pb-btn pb-icon pb-play" aria-label={playing?"Pause":"Play"} title={(playing?"Pause":"Play")+" (Space)"} onClick={()=>dispatch({type:"TOGGLE_PLAY"})}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d={playing?"M3 1.5h3v11H3zM8 1.5h3v11H8z":"M3 1v12l9.5-6z"}/></svg>
+            </button>
+            <button type="button" className="pb-btn pb-icon" aria-label="Reverse playback" title="Reverse playback" aria-pressed={!!reverse} onClick={()=>dispatch({type:"TOGGLE_REVERSE"})}>
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M11 1v12L1.5 7z"/></svg>
+            </button>
+            {/* Live: jumps to Now and goes to /live. Already there and playing at Now, it leaves /live instead. */}
+            <button type="button" className="pb-btn pb-live" aria-pressed={!!liveUrl} onClick={()=>{
                 const atNow = playing && Math.abs(posRef.current - nowToPos()) * 3600 <= 5;
                 if (liveUrl && atNow) { window.history.pushState(null, '', _urlFor(_urlMode(), false)); setLiveUrl(false); return; }
                 if (!liveUrl) { window.history.pushState(null, '', _urlFor(_urlMode(), true)); setLiveUrl(true); }
                 goNow();
                 setBarHidden(true);
               }}
-                title="Jump to real-world clock time mapped to 2019, switch to RT, play, and stay at /live (page loads land on Now). Click again while live to leave /live (page loads resume where you left off)"
-                style={{ background:liveUrl?"#351a1a":"transparent", color:liveUrl?"#f09b9b":"#777", border:"1px solid "+(liveUrl?"#602d2d":"#1e1e1e"), borderRadius:4, padding:"5px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:liveUrl?600:400 }}>Live</button>
-            </div>
+                title="Jump to real-world clock time mapped to 2019, switch to RT, play, and stay at /live (page loads land on Now). Click again while live to leave /live (page loads resume where you left off)">Live</button>
           </div>
-
-          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-
-          {/* SPEED */}
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:3,paddingRight:14}}>
-            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SPEED</span>
-            {/* Labels row — same gap/widths as controls row below */}
-            <div style={{display:"flex",alignItems:"flex-end",gap:16}}>
-              <div style={{minWidth:76}} />{/* spacer matching select width */}
-              {isRTMode && <span style={{fontSize:11,color:"#b85050",letterSpacing:"0.03em",width:148}}>Counter Update Interval</span>}
-              <span style={{fontSize:11,color:"#4e9e4e",letterSpacing:"0.03em"}}>Playback Speed</span>
+          <div className="pb-seek">
+            <input type="range" className="pb-range" aria-label="Seek" aria-valuetext={fmtDateTime(curTime)} min={SEEK_START} max={effectiveMaxIdx} step="any" value={pos} style={{"--p":Math.max(0,Math.min(1,(pos-SEEK_START)/((effectiveMaxIdx-SEEK_START)||1)))}} onChange={e=>{const v=+e.target.value;setPos(v);posRef.current=v;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});if(musicArrowSeek)musicPickRandom(false);}} onMouseUp={e=>e.target.blur()} onTouchEnd={e=>e.target.blur()}/>
+          </div>
+          <div className="pb-group">
+            {clockEditing
+              ? <input type="datetime-local" step={1} autoFocus defaultValue={fmtDateTimeLocalET(curTime)} min={fmtDateTimeLocalET(REAL_DATA_START_MS)} max={fmtDateTimeLocalET(REAL_DATA_END_MS)}
+                    onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
+                    onBlur={e=>{ const ts=parseDateTimeLocalET(e.target.value); if(ts!=null){const cl=Math.max(REAL_DATA_START_MS,Math.min(REAL_DATA_END_MS,ts));const p=tsToPos(cl);setPos(p);posRef.current=p;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});} setClockEditing(false); }}
+                  aria-label="Jump to date and time" className="pb-input"/>
+              : <button type="button" className="pb-btn pb-clock" onClick={()=>setClockEditing(true)} title="Click to jump to date/time">{fmtDateTime(curTime)}</button>}
+            <div className="pb-seg" role="group" aria-label="Display time zone" title="Time zone for the clock, charts, tooltips and estimates">
+              {["ET","GMT","IST"].map(z=><button type="button" key={z} aria-pressed={dispTz===z} onClick={()=>setDispTz(z)}>{z}</button>)}
             </div>
-            {/* Controls row */}
-            <div style={{display:"flex",alignItems:"center",gap:16}}>
-              <select value={speedMode} onChange={e=>{dispatch({type:"SET_MODE",mode:e.target.value});e.target.blur();}} style={{ background:"#0e1018", color:"#aaa", border:"1px solid #1e1e1e", borderRadius:4, padding:"4px 6px", fontSize:12, fontFamily:"inherit", cursor:"pointer", outline:"none", minWidth:76 }}>
-                {ALL_MODES.map(m=><option key={m.key} value={m.key}>{m.label}</option>)}
-              </select>
-              {isRTMode && <div style={{display:"flex",alignItems:"center",gap:4,width:148}}>
-                <div style={{position:"relative",width:116,display:"flex",alignItems:"center"}}>
-                  <input type="range" min={1} max={5} step={1} value={rtInterval} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()} style={{width:116,margin:0,accentColor:"#c05050",cursor:"pointer"}}/>
-                  {/* Step dividers: one per option, inset by half the thumb width (16px); skipped under the thumb */}
-                  {[0,1,2,3,4].filter(i => i !== rtInterval - 1).map(i => <div key={i} style={{position:"absolute",left:`calc(8px + ${i/4} * (100% - 16px) - 1px)`,top:"50%",width:2,height:4,transform:"translateY(-50%)",background:"#888",pointerEvents:"none"}}/>)}
-                </div>
-                <span style={{fontSize:11,color:"#b07070",minWidth:20}}>{rtInterval}s</span>
-              </div>}
-              {/* Mult slider in log10-space: -1..2 = 0.1x..100x; 0 = 1x centered */}
-              <div style={{display:"flex",alignItems:"center",gap:5}}>
-                <input type="range" min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()} style={{width:84,accentColor:"#3a9e3a",cursor:"pointer"}}/>
-                <input ref={multInputRef} type="text" inputMode="decimal" value={multText}
+            <button type="button" className="pb-btn pb-icon pb-ghost" aria-label="Collapse playback bar" aria-expanded="true" title="Collapse playback bar" onClick={()=>setMenuOpen(false)}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 8l4-4 4 4"/></svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Row 2: speed on the left; view, data and settings on the right */}
+        <div className="pb-row">
+          <div className="pb-group" role="group" aria-label="Speed" style={{gap:14,flexWrap:"wrap"}}>
+            <select className="pb-select" aria-label="Speed mode" value={speedMode} onChange={e=>{dispatch({type:"SET_MODE",mode:e.target.value});e.target.blur();}}>
+              {ALL_MODES.map(m=><option key={m.key} value={m.key}>{m.label}</option>)}
+            </select>
+            {isRTMode && <label className="pb-field" title="Counter Update Interval">Counter interval
+              <span className="pb-steps">
+                <input type="range" className="pb-range" aria-label="Counter update interval" aria-valuetext={rtInterval+" seconds"} min={1} max={5} step={1} value={rtInterval} style={{"--p":(rtInterval-1)/4,"--fill":"#f0888c"}} onChange={e=>setRtInterval(Number(e.target.value))} onMouseUp={e=>e.target.blur()}/>
+                {/* Step dividers: one per option, inset by half the thumb; skipped under the thumb */}
+                {[0,1,2,3,4].filter(i => i !== rtInterval - 1).map(i => <i key={i} style={{left:`calc(7px + ${i/4} * (100% - 14px))`}}/>)}
+              </span>
+              <span style={{minWidth:18,color:"#e6e9f0"}}>{rtInterval}s</span>
+            </label>}
+            {/* Mult slider in log10-space: -1..2 = 0.1x..100x; 0 = 1x centered */}
+            <div className="pb-field"><span>Playback speed</span>
+              <input type="range" className="pb-range" aria-label="Playback speed" aria-valuetext={parseFloat(mult.toFixed(2))+"x"} min={MULT_LOG_MIN} max={MULT_LOG_MAX} step={0.01} value={Math.log10(mult)} style={{width:100,"--fill":"#6fcf8a","--p":(Math.log10(mult)-MULT_LOG_MIN)/(MULT_LOG_MAX-MULT_LOG_MIN)}} onChange={e=>dispatch({type:"SET_MULT",mult:Math.pow(10,parseFloat(e.target.value))})} onMouseUp={e=>e.target.blur()}/>
+              <span className="pb-group" style={{gap:4}}><input ref={multInputRef} type="text" inputMode="decimal" value={multText}
                   onChange={e=>{ const s=e.target.value; setMultText(s); const v=parseFloat(s); if(!isNaN(v)&&v>=MULT_MIN&&v<=MULT_MAX)dispatch({type:"SET_MULT",mult:v}); }}
                   onBlur={()=>setMultText(String(parseFloat(mult.toFixed(2))))}
                   onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
-                  style={{width:40,background:"#0e1018",color:mult!==1?"#bbb":"#888",border:"1px solid #1e1e1e",borderRadius:4,padding:"3px 5px",fontSize:12,fontFamily:"inherit",textAlign:"right",outline:"none",fontVariantNumeric:"tabular-nums"}}/>
-                <span style={{fontSize:12,color:mult!==1?"#888":"#777"}}>x</span>
-              </div>
-              {/* Dynamic: getDynSpeed drives rAF-paced playhead at gap-dependent rate */}
-              {speedMode==="1m" && <button onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate" style={{ background:dyn?"#1a2535":"transparent", color:dyn?"#7cb9f7":"#777", border:"1px solid "+(dyn?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Dynamic<span style={{display:"inline-block",minWidth:38,marginLeft:isDyn?4:0,color:"#4a6080",textAlign:"right"}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>}
+                  aria-label="Playback speed multiplier" className="pb-input pb-num"/>x</span>
             </div>
+            {/* Dynamic: getDynSpeed drives rAF-paced playhead at gap-dependent rate */}
+            {speedMode==="1m" && <button type="button" className="pb-btn" aria-pressed={!!dyn} onClick={()=>dispatch({type:"TOGGLE_DYN"})} title="Dynamic speed: gap-dependent rate">Dynamic<span style={{minWidth:38,textAlign:"right",fontWeight:400}}>{isDyn?(effectiveSpeed!=null?Math.round(effectiveSpeed):0)+'s/s':''}</span></button>}
           </div>
 
-          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
+          <div className="pb-keys"><span><kbd>Space</kbd>play/pause</span><span><kbd>H</kbd>hide/show bar</span></div>
 
-          {/* SEEK */}
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,flex:"1 1 340px",minWidth:340}}>
-            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SEEK</span>
-            <div style={{display:"flex",alignItems:"center",gap:6}}>
-              <input type="range" min={SEEK_START} max={effectiveMaxIdx} step="any" value={pos} onChange={e=>{const v=+e.target.value;setPos(v);posRef.current=v;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});if(musicArrowSeek)musicPickRandom(false);}} onMouseUp={e=>e.target.blur()} onTouchEnd={e=>e.target.blur()} style={{flex:1,accentColor:"#4a6080",cursor:"pointer"}}/>
-              {clockEditing
-                ? <input type="datetime-local" step={1} autoFocus defaultValue={fmtDateTimeLocalET(curTime)} min={fmtDateTimeLocalET(REAL_DATA_START_MS)} max={fmtDateTimeLocalET(REAL_DATA_END_MS)}
-                    onKeyDown={e=>{ if(e.key==="Enter")e.target.blur(); }}
-                    onBlur={e=>{ const ts=parseDateTimeLocalET(e.target.value); if(ts!=null){const cl=Math.max(REAL_DATA_START_MS,Math.min(REAL_DATA_END_MS,ts));const p=tsToPos(cl);setPos(p);posRef.current=p;dispatch({type:"STOP"});clearRT();dispatch({type:"BUMP_SEEK"});} setClockEditing(false); }}
-                    style={{fontSize:12,background:"#0e1018",color:"#bbb",border:"1px solid #2d4060",borderRadius:4,padding:"3px 5px",fontFamily:"inherit",outline:"none",colorScheme:"dark"}}/>
-                : <span onClick={()=>setClockEditing(true)} title="Click to jump to date/time" style={{fontSize:13,color:"#999",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",cursor:"pointer",padding:"2px 6px",background:"#0e1018",borderRadius:3,border:"1px solid #1a1d28",width:150,display:"inline-block",textAlign:"center"}}>{fmtDateTime(curTime)}</span>}
-              <span ref={fpsDisplayRef} style={{fontSize:11,color:"#666",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap",width:44,textAlign:"right",display:"inline-block"}}>-- fps</span>
+          <div className="pb-end">
+            <span ref={fpsDisplayRef} className="pb-fps">-- fps</span>
+            <div className="pb-seg" role="group" aria-label="View">
+              {[{id:"socialblade",label:"SocialBlade"},{id:"flare",label:"Flare"},{id:"dashboard",label:"Dashboard"}].map(opt=>
+                <button type="button" key={opt.id} aria-pressed={view===opt.id} onClick={()=>setView(opt.id)}>{opt.label}</button>)}
             </div>
-            <div style={{display:"flex",gap:20,alignItems:"center"}}>
-              <span style={{fontSize:12,color:"#aaa"}}>H — hide/show bar</span>
-              <span style={{fontSize:12,color:"#aaa"}}>Space — play/pause</span>
-              {/* Display time zone: sits under the clock (right-aligned like it) */}
-              <div title="Time zone for the clock, charts, tooltips and estimates" style={{marginLeft:"auto",marginRight:50,width:164,display:"flex",justifyContent:"center"}}>
-                <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
-                  {["ET","GMT","IST"].map((z,i)=>(
-                    <button key={z} onClick={()=>setDispTz(z)} style={{background:dispTz===z?"#1a2535":"transparent",color:dispTz===z?"#9bbfdf":"#777",border:"none",borderLeft:i===0?"none":"1px solid #1e1e1e",padding:"2px 10px",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:dispTz===z?600:400}}>{z}</button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-
-          {/* VIEW */}
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
-            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>VIEW</span>
-            <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:5,overflow:"hidden"}}>
-              {[{id:"socialblade",label:"SocialBlade"},{id:"flare",label:"Flare"},{id:"dashboard",label:"Dashboard"}].map((opt,i)=>{
-                const active=view===opt.id;
-                return <button key={opt.id} onClick={()=>setView(opt.id)} style={{ background:active?"#1e3050":"transparent", color:active?"#7cb9f7":"#777", border:"none", borderLeft:i===0?"none":"1px solid #1e1e1e", padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:active?600:400 }}>{opt.label}</button>;
-              })}
-            </div>
-          </div>
-
-          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-
-          {/* DATA: cycles Real Data -> Alt Scenario -> 100M (kept in the URL; swaps the datasets in place) */}
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
-            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DATA</span>
-            <button onClick={(e)=>{ const m = _dataModeTarget(_altSwitchTarget ?? DATA_MODE, e.shiftKey); window.history.pushState(null, '', _modePath(m)); setAltSwitching(true); _setDataMode(m); }}
-              title={DATA_100M ? "100M: just Aug 18 00:00 - Aug 30 00:00 EDT, separate from the other data. Click for Real Data" : ALT_SCEN ? `Alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT. Click for Real Data` : "Real data. Click for the alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT"}
-              style={{ background:DATA_100M?"#2f2510":ALT_SCEN?"#2a1a35":"transparent", color:DATA_100M?"#e3b85c":ALT_SCEN?"#c99bf0":"#777", border:"1px solid "+(DATA_100M?"#5c4a1e":ALT_SCEN?"#4a2d60":"#1e1e1e"), borderRadius:4, padding:"5px 12px", fontSize:13, cursor:"pointer", fontFamily:"inherit", fontWeight:ALT_SCEN||DATA_100M?600:400, opacity:altSwitching?0.6:1 }}>{altSwitching ? "Switching…" : _DATA_MODE_LABEL[DATA_MODE]}</button>
-          </div>
-
-          {/* SETTINGS: everything specific to the current view, in a popover */}
-          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-          <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4,paddingRight:10}}>
-            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>SETTINGS</span>
-            <button type="button" className="cfg-open" popovertarget="cfg-panel">⚙ {viewName}</button>
+            {/* DATA: cycles Real Data -> Alt Scenario -> 100M (kept in the URL; swaps the datasets in place) */}
+            <button type="button" className="pb-btn" data-mode={DATA_100M?"100m":ALT_SCEN?"alt":undefined} aria-busy={!!altSwitching} onClick={(e)=>{ const m = _dataModeTarget(_altSwitchTarget ?? DATA_MODE, e.shiftKey); window.history.pushState(null, '', _modePath(m)); setAltSwitching(true); _setDataMode(m); }}
+              title={DATA_100M ? "100M: just Aug 18 00:00 - Aug 30 00:00 EDT, separate from the other data. Click for Real Data" : ALT_SCEN ? `Alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT. Click for Real Data` : "Real data. Click for the alternate 'Aleksander Effect' scenario, from Apr 11 12:00 EDT"}>{altSwitching ? "Switching…" : _DATA_MODE_LABEL[DATA_MODE]}</button>
+            {/* SETTINGS: everything specific to the current view, in a popover */}
+            <button type="button" className="pb-btn" popovertarget="cfg-panel" title={viewName + " settings"}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M1 4h6M11 4h2M1 10h2M7 10h6"/><circle cx="9" cy="4" r="1.8"/><circle cx="5" cy="10" r="1.8"/></svg>
+              Settings
+            </button>
             <div id="cfg-panel" className="cfg-panel" popover="auto" role="group" aria-label={viewName + " settings"}>
               <div className="cfg-head">
                 <span>{viewName} settings</span>
@@ -8911,34 +8927,21 @@ export default function SocialBladeLive() {
                 </CfgGroup>}
               </>}
             </div>
-          </div>
-
-          <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-
-          {/* DEV (dev mode only, toggle with Shift+H) */}
-          {devMode && <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4}}>
-            <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>DEV</span>
-            <div style={{display:"flex",alignItems:"center",gap:5}}>
-              <button onClick={()=>{ setInspectorOpen(v=>!v); if(!inspectorPinned) setInspectorPinnedTime(curTime); }} style={{ background:inspectorOpen?"#1e3050":"transparent", color:inspectorOpen?"#7cb9f7":"#777", border:"1px solid "+(inspectorOpen?"#2d4060":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Data</button>
-              <button onClick={()=>setRawMode(v=>!v)} title={rawMode?"Switch to smoothed data":"Switch to raw unfiltered data"} style={{ background:rawMode?"#301818":"transparent", color:rawMode?"#f88":"#777", border:"1px solid "+(rawMode?"#603030":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>{rawMode?"Raw":"Smooth"}</button>
-              <button onClick={()=>setPatchEditorOpen(v=>!v)} title="Edit manual data patches (audit marks and smooth windows)" style={{ background:patchEditorOpen?"#1e3020":"transparent", color:patchEditorOpen?"#7fdf9b":"#777", border:"1px solid "+(patchEditorOpen?"#2d6040":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Patches{(patches.audit_invalidations.length+patches.smooth_windows.length)>0?" ("+(patches.audit_invalidations.length+patches.smooth_windows.length)+")":""}</button>
-              {view==="dashboard" && <button onClick={()=>setDashRawDelta(v=>!v)} title="Replace last chart slot with Raw-minus-Smooth delta for both channels (last 1h)" style={{ background:dashRawDelta?"#1e1535":"transparent", color:dashRawDelta?"#b88cf7":"#777", border:"1px solid "+(dashRawDelta?"#4d2d9a":"#1e1e1e"), borderRadius:4, padding:"4px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Delta</button>}
-            </div>
-          </div>}
-
-          {devMode && <>
-            <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch",margin:"0 10px"}}/>
-            {/* WINDOW */}
-            <div style={{display:"flex",flexDirection:"column",justifyContent:"center",gap:4}}>
-              <span style={{fontSize:14,color:"#888",letterSpacing:"0.05em"}}>WINDOW</span>
-              <div style={{display:"inline-flex",background:"#0a0c14",border:"1px solid #1e1e1e",borderRadius:4,overflow:"hidden"}}>
-                <button onClick={()=>{ setScale(1); window.resizeTo(1280,720+(window.outerHeight-window.innerHeight)); }} title="Resize to 1280x720 viewport" style={{ background:scale===1?"#1e2535":"transparent", color:scale===1?"#aaa":"#777", border:"none", borderRight:"1px solid #1e1e1e", padding:"4px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>720p</button>
-                <button onClick={()=>{ setScale(1.5); window.resizeTo(1920,1080+(window.outerHeight-window.innerHeight)); }} title="Render Flare at 1920x1080" style={{ background:scale===1.5?"#1e2535":"transparent", color:scale===1.5?"#aaa":"#777", border:"none", padding:"4px 10px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>1080p</button>
+            {/* DEV (dev mode only, toggle with Shift+H) */}
+            {devMode && <div className="pb-group" role="group" aria-label="Dev" style={{flexWrap:"wrap"}}>
+              <span className="pb-sep" aria-hidden="true"/>
+              <button type="button" className="pb-btn" aria-pressed={!!inspectorOpen} onClick={()=>{ setInspectorOpen(v=>!v); if(!inspectorPinned) setInspectorPinnedTime(curTime); }}>Data</button>
+              <button type="button" className="pb-btn" onClick={()=>setRawMode(v=>!v)} title={rawMode?"Switch to smoothed data":"Switch to raw unfiltered data"} style={rawMode?{background:"#351a1c",borderColor:"#a34a50",color:"#ffb3b3"}:undefined}>{rawMode?"Raw":"Smooth"}</button>
+              <button type="button" className="pb-btn" aria-pressed={!!patchEditorOpen} onClick={()=>setPatchEditorOpen(v=>!v)} title="Edit manual data patches (audit marks and smooth windows)">Patches{(patches.audit_invalidations.length+patches.smooth_windows.length)>0?" ("+(patches.audit_invalidations.length+patches.smooth_windows.length)+")":""}</button>
+              {view==="dashboard" && <button type="button" className="pb-btn" aria-pressed={!!dashRawDelta} onClick={()=>setDashRawDelta(v=>!v)} title="Replace last chart slot with Raw-minus-Smooth delta for both channels (last 1h)">Delta</button>}
+              <div className="pb-seg" role="group" aria-label="Window size">
+                <button type="button" aria-pressed={scale===1} onClick={()=>{ setScale(1); window.resizeTo(1280,720+(window.outerHeight-window.innerHeight)); }} title="Resize to 1280x720 viewport">720p</button>
+                <button type="button" aria-pressed={scale===1.5} onClick={()=>{ setScale(1.5); window.resizeTo(1920,1080+(window.outerHeight-window.innerHeight)); }} title="Render Flare at 1920x1080">1080p</button>
               </div>
-            </div>
-          </>}
-
-        </div>}
+            </div>}
+          </div>
+        </div>
+        </>}
         {false && <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",borderTop:"1px solid #1a1d28",flexWrap:"nowrap",overflow:"hidden"}}>
           <select value={musicLib} onChange={e=>{const l=e.target.value;setMusicLib(l);setMusicPlaylist(musicGetPl(l,musicShuffle));}} style={{background:"#1a1d28",color:"#ccc",border:"1px solid #2a2d38",borderRadius:4,padding:"2px 4px",fontSize:11,fontFamily:"inherit",cursor:"pointer",flexShrink:0}}>
             {[{id:'monstercat',label:'Monstercat'},{id:'congratulations',label:'Congratulations'},{id:'lasagna',label:'Lasagna'},{id:'adaptive',label:'Adaptive'},{id:'custom',label:'Custom'}].map(l=><option key={l.id} value={l.id}>{l.label}</option>)}
@@ -9020,9 +9023,9 @@ export default function SocialBladeLive() {
           </div>
           );
         })()}
-        <div style={{ display:"flex", justifyContent:"center" }}>
-          <button onClick={()=>setMenuOpen(v=>!v)} style={{ background:"transparent", color:"#555", border:"none", cursor:"pointer", fontSize:10, fontFamily:"inherit", padding:"2px 20px", lineHeight:1 }}>{menuOpen?"\u25B2":"\u25BC"}</button>
-        </div>
+        {!menuOpen && <button type="button" className="pb-toggle" aria-label="Expand playback bar" aria-expanded="false" title="Expand playback bar" onClick={()=>setMenuOpen(true)}>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg>
+        </button>}
       </div>}
 
       {/* LAYOUT: SocialBlade entry point - see LAYOUTS.md */}
@@ -9693,7 +9696,7 @@ export default function SocialBladeLive() {
               : [{color:eDC.PDP,label:"PewDiePie"},{color:eDC.TS,label:"T-Series"},{color:"#e2e5eb",label:"Gap (PDP - TS)"}],
             altLayout:dashAltLayout,
             milestoneEl:dashMilestoneEl,
-            timezonesEl:!flareHides("timezones")&&(curPoint?.t||tzDisplayMs)?(<div style={{textAlign:"left",fontSize:16,color:eDC.TEXT,fontVariantNumeric:"tabular-nums"}}>
+            timezonesEl:!flareHides("timezones")&&(curPoint?.t||tzDisplayMs)?(<div style={{textAlign:"left",whiteSpace:"nowrap",fontSize:16,color:eDC.TEXT,fontVariantNumeric:"tabular-nums"}}>
               {TIMEZONES.map(z=>{const off=z.getOffset(tzDisplayMs);const label=z.label==="EST"?(off===-4?"EDT":"EST"):z.label==="GMT"?(off===1?"BST":"GMT"):z.label;const d=new Date(tzDisplayMs+off*3600000);const dateStr=d.toLocaleDateString("en-US",{timeZone:"UTC",weekday:"short",month:"long",day:"numeric",year:"numeric"});const timeStr=String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0");return(<div key={z.label} style={{marginBottom:3}}><div>{dateStr}</div><div><span style={{color:eDC.TEXT,fontWeight:600}}>{timeStr}{" "}{label}</span>{" "}<span style={{fontSize:14,fontFamily:"'Twemoji Country Flags',Arial,sans-serif"}}>{z.flag}</span></div></div>);})}
             </div>):null,
           });

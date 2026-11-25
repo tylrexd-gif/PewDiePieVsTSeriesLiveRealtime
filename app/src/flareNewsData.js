@@ -10,31 +10,32 @@
 // Required: ms (UTC when visible), label ("Mon DD"), text
 // Optional: windowHours - how long (in hours) the entry stays in the feed.
 //           Defaults to 336 (2 weeks) if omitted.
-//           passInfo: true - Pass Information (pass predictions and lists of pass dates):
-//           shown only in the Flare feed, not SocialBlade.
+//           passInfo: true - marks lists of pass dates; shown in both feeds like any other entry.
+//           flareExpectedPass: true - "predicted to pass in x" entries: shown only in the
+//           Flare feed, not SocialBlade.
 export const FLARE_NEWS_ENTRIES = [
   { ms: Date.UTC(2018, 9, 26, 21, 0, 0), label: "Oct 26", text: "MrBeast advertises PewDiePie in a viral video", windowHours: 168 },
   { ms: Date.UTC(2018, 9, 17, 0, 0, 0), label: "", text: "PewDiePie - 20 - 30k subs per day, T-Series - 130k - 150k", windowHours: 237 },
-  { ms: Date.UTC(2018, 9, 17, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, however PewDiePie will still be the most subscribed individual", windowHours: 72, passInfo: true },
-  { ms: Date.UTC(2018, 9, 20, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, however PewDiePie will still be the most subscribed individual", windowHours: 72, passInfo: true },
-  { ms: Date.UTC(2018, 9, 23, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 4 days, however PewDiePie will still be the most subscribed individual", windowHours: 48, passInfo: true },
-  { ms: Date.UTC(2018, 9, 25, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 days, however PewDiePie will still be the most subscribed individual", windowHours: 24, passInfo: true },
-  { ms: Date.UTC(2018, 9, 26, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 day, however PewDiePie will still be the most subscribed individual", windowHours: 24, passInfo: true },
-  { ms: Date.UTC(2018, 9, 27, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 72, passInfo: true },
-  { ms: Date.UTC(2018, 9, 30, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 72, passInfo: true },
-  { ms: Date.UTC(2018, 10, 2, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, passInfo: true },
-  { ms: Date.UTC(2018, 10, 6, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, passInfo: true },
-  { ms: Date.UTC(2018, 10, 10, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, passInfo: true },
-  { ms: Date.UTC(2018, 10, 14, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, passInfo: true },
-  { ms: Date.UTC(2018, 10, 18, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 72, passInfo: true },
-  { ms: Date.UTC(2018, 10, 21, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 4 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 48, passInfo: true },
-  { ms: Date.UTC(2018, 10, 23, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 48, passInfo: true },
-  { ms: Date.UTC(2018, 10, 25, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 day, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, passInfo: true },
-  { ms: Date.UTC(2018, 10, 28, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, passInfo: true },
-  { ms: Date.UTC(2018, 10, 29, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 4 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, passInfo: true },
-  { ms: Date.UTC(2018, 10, 30, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 3 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, passInfo: true },
-  { ms: Date.UTC(2018, 11, 1, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, passInfo: true },
-  { ms: Date.UTC(2018, 11, 2, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 day, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 21, passInfo: true },
+  { ms: Date.UTC(2018, 9, 17, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, however PewDiePie will still be the most subscribed individual", windowHours: 72, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 9, 20, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, however PewDiePie will still be the most subscribed individual", windowHours: 72, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 9, 23, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 4 days, however PewDiePie will still be the most subscribed individual", windowHours: 48, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 9, 25, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 days, however PewDiePie will still be the most subscribed individual", windowHours: 24, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 9, 26, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 day, however PewDiePie will still be the most subscribed individual", windowHours: 24, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 9, 27, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 72, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 9, 30, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 72, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 2, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 6, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 10, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 weeks, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 14, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 96, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 18, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 72, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 21, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 4 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 48, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 23, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 48, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 25, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 day, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 28, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 week, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 29, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 4 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 10, 30, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 3 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 11, 1, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 2 days, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 24, flareExpectedPass: true },
+  { ms: Date.UTC(2018, 11, 2, 0, 0, 0), label: "", text: "T-Series is predicted to pass PewDiePie in approximately 1 day, depending on how PewDiePie's gains change, however PewDiePie will still be the most subscribed individual", windowHours: 21, flareExpectedPass: true },
   { ms: Date.UTC(2018, 9, 29, 18, 45, 0), label: "", text: "Oct 29 - PewDiePie uploads \"I need your help...\"", windowHours: 72 },   // 14:45 EDT
   { ms: Date.UTC(2018, 10, 2, 0, 0, 0), label: "", text: "Nov 2 - PewDiePie reaches 69 million subscribers", windowHours: 168 },
   { ms: Date.UTC(2018, 10, 2, 19, 30, 0), label: "", text: "Nov 2 - PewDiePie uploads \"This Is Epic (Bonus Meme ft. Ben Shapiro)\"", windowHours: 72 },   // 15:30 EDT
@@ -49,12 +50,14 @@ export const FLARE_NEWS_ENTRIES = [
   { ms: Date.UTC(2018, 10, 22, 17, 30, 0), label: "", text: "Nov 22 - PewDiePie uploads \"Bich Lasagna V2 (Beat Saber)\"", windowHours: 72 },   // 12:30 EST
   { ms: Date.UTC(2018, 10, 23, 6, 30, 0), label: "", text: "Nov 23 - T-Series releases Mere Naam Tu", windowHours: 48 },   // 1:30 EST
   { ms: Date.UTC(2018, 10, 24, 9, 35, 0), label: "", text: "Nov 24 - The subscriber gap falls under 100,000 for the first time", windowHours: 96 },
+  { ms: Date.UTC(2018, 10, 25, 21, 10, 0), label: "", text: "Nov 25 - MrBeast uploads \"Saying Pewdiepie 100,000 Times\"", windowHours: 72 },   // 16:10 EST
   { ms: Date.UTC(2018, 10, 27, 5, 30, 0), label: "", text: "Nov 27 - T-Series releases Tere Te", windowHours: 48 },   // 0:30 EST
   { ms: Date.UTC(2018, 10, 28, 21, 20, 0), label: "", text: "Nov 28 - PewDiePie uploads \"Watch this video in 2X SPEED!!\"", windowHours: 72 },   // 16:20 EST
   { ms: Date.UTC(2018, 10, 29, 17, 0, 0), label: "", text: "Nov 29 - A hacker makes a claimed 50,000 printers print messages telling people to subscribe to PewDiePie", windowHours: 72 },   // 12:00 EST (exact time unknown)
   { ms: Date.UTC(2018, 10, 30, 10, 0, 0), label: "", text: "Nov 30 - T-Series releases Dilbar Arabic Version", windowHours: 48 },   // 5:00 EST
   { ms: Date.UTC(2018, 11, 2, 18, 15, 0), label: "", text: "Dec 2 - PewDiePie uploads \"SUBSCRIBE GODDAMMIT\"", windowHours: 72 },   // 13:15 EST
-  { ms: Date.UTC(2018, 11, 2, 21, 0, 0), label: "", text: "Dec 2 - Markiplier does a livestream titled \"I Literally Won't Shut Up Until You Subscribe To PewDiePie\", leading to a huge increase in PewDiePie's sub count", windowHours: 96 },
+  { ms: Date.UTC(2018, 11, 2, 20, 57, 0), label: "", text: "Markiplier is live with a stream titled \"I Literally Won't Shut Up Until You Subscribe To PewDiePie\"", windowHours: 2819 / 3600 },   // 15:57 EST until 16:44 EST, when the one below replaces it
+  { ms: Date.UTC(2018, 11, 2, 21, 44, 0), label: "", text: "Dec 2 - Markiplier does a livestream titled \"I Literally Won't Shut Up Until You Subscribe To PewDiePie\", leading to a huge increase in PewDiePie's sub count", windowHours: 96 },   // 16:44 EST, when the stream ends
   { ms: Date.UTC(2018, 11, 2, 21, 0, 0), label: "", text: "T-Series was under 20,000 subscribers away from overtaking PewDiePie", windowHours: 96 },
   { ms: Date.UTC(2018, 11, 3, 16, 0, 0), label: "", text: "PewDiePie gained over 540k subscribers on Dec 2", windowHours: 77 },
   { ms: Date.UTC(2018, 11, 3, 17, 45, 0), label: "", text: "Dec 3 - PewDiePie uploads \"This is getting out of control...\"", windowHours: 72 },   // 12:45 EST
@@ -165,10 +168,9 @@ export const FLARE_PROMOTIONS = [
   { ms: Date.UTC(2018, 10, 28, 13,  0, 0), channel: 'pdp', by: 'Davie504' },         // Nov 28  8AM EST
   { ms: Date.UTC(2018, 10, 30, 23,  0, 0), channel: 'pdp', by: 'Justin Roberts' },   // Nov 30  6PM EST
   { ms: Date.UTC(2018, 11,  1, 21,  0, 0), channel: 'pdp', by: 'Ninja' },            // Dec  1  4PM EST
-  { ms: Date.UTC(2018, 11,  2, 18,  0, 0), channel: 'pdp', by: 'jacksepticeye' },    // Dec  2  1PM EST
+  { ms: Date.UTC(2018, 11,  2, 17, 30, 0), channel: 'pdp', by: 'jacksepticeye' },    // Dec  2  12:30PM EST
   { ms: Date.UTC(2018, 11,  2, 19,  0, 0), channel: 'pdp', by: 'Dawko' },            // Dec  2  2PM EST
-  { ms: Date.UTC(2018, 11,  2, 22,  0, 0), channel: 'pdp', by: 'Markiplier' },       // Dec  2  5PM EST
-  { ms: Date.UTC(2018, 11,  2, 22,  0, 0), channel: 'pdp', by: 'boogie2988' },       // Dec  2  5PM EST
+  { ms: Date.UTC(2018, 11,  2, 21,  0, 0), channel: 'pdp', by: 'boogie2988' },       // Dec  2  4PM EST
   { ms: Date.UTC(2018, 11,  6, 23,  0, 0), channel: 'pdp', by: 'Logan Paul Vlogs' }, // Dec  6  6PM EST
   { ms: Date.UTC(2018, 11, 10, 23,  0, 0), channel: 'pdp', by: 'Miniminter' },       // Dec 10  6PM EST
   { ms: Date.UTC(2018, 11, 11, 22,  0, 0), channel: 'pdp', by: 'TGFBro' },           // Dec 11  5PM EST
